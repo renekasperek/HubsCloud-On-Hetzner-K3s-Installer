@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: haproxy-ingress-lb
+  namespace: haproxy
+  annotations:
+    load-balancer.hetzner.cloud/location: {{ location }}
+    load-balancer.hetzner.cloud/network: "{{ private_network_id }}"
+    load-balancer.hetzner.cloud/labels: purpose=ingress,env=prod
+    load-balancer.hetzner.cloud/use-private-ip: "true"
+  labels:
+    svccontroller.k3s.cattle.io/lbpool: master-only
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: haproxy-ingress
+    app.kubernetes.io/instance: haproxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+    - name: https
+      port: 443
+      targetPort: 4443
+    - name: dialog
+      port: 4443
+      targetPort: 4443
+    - name: turn
+      port: 5349
+      targetPort: 5349

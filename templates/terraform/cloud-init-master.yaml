@@ -1,0 +1,54 @@
+#cloud-config
+package_update: true
+packages:
+  - curl
+
+users:
+  - name: cluster
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: sudo
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# Wait for user creation to complete before running commands
+bootcmd:
+  - sleep 5
+
+runcmd:
+  # Install K3s with private network interface (master node) using pre-shared token and cluster-init for multi-master
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller --disable traefik --flannel-iface=enp7s0 --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 --node-name=$(hostname -f) --kube-controller-manager-arg=bind-address=0.0.0.0 --kube-proxy-arg=metrics-bind-address=0.0.0.0 --kube-scheduler-arg=bind-address=0.0.0.0 --tls-san=10.0.1.1 --tls-san=$(curl -s https://ipinfo.io/ip) --token=${k3s_token}" sh -
+
+  # Wait for K3s to fully start and create necessary files
+  - sleep 15
+  - while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do echo "Waiting for K3s to start..."; sleep 5; done
+
+  # Ensure cluster user home directory exists with proper permissions
+  - mkdir -p /home/cluster
+  - chown cluster:cluster /home/cluster
+  - chmod 755 /home/cluster
+
+  # Create and setup .kube directory
+  - mkdir -p /home/cluster/.kube
+  - if [ -f /etc/rancher/k3s/k3s.yaml ]; then cp /etc/rancher/k3s/k3s.yaml /home/cluster/.kube/config; fi
+  - chown -R cluster:cluster /home/cluster/.kube
+  - chmod 700 /home/cluster/.kube
+  - if [ -f /home/cluster/.kube/config ]; then chmod 600 /home/cluster/.kube/config; fi
+
+  # Create and setup .ssh directory
+  - mkdir -p /home/cluster/.ssh
+  - if [ -f /root/.ssh/authorized_keys ]; then cp /root/.ssh/authorized_keys /home/cluster/.ssh/authorized_keys; fi
+  - chown -R cluster:cluster /home/cluster/.ssh
+  - chmod 700 /home/cluster/.ssh
+  - if [ -f /home/cluster/.ssh/authorized_keys ]; then chmod 600 /home/cluster/.ssh/authorized_keys; fi
+
+  # Set ownership for K3s files if they exist
+  - if [ -f /etc/rancher/k3s/k3s.yaml ]; then chown cluster:cluster /etc/rancher/k3s/k3s.yaml; fi
+  - if [ -f /var/lib/rancher/k3s/server/node-token ]; then chown cluster:cluster /var/lib/rancher/k3s/server/node-token; fi
+
+  # Log completion
+  - echo "Cloud-init setup completed successfully" >> /var/log/cloud-init-custom.log
+  - echo "K3s status:" >> /var/log/cloud-init-custom.log
+  - systemctl status k3s >> /var/log/cloud-init-custom.log 2>&1
+  - echo "Directory structure:" >> /var/log/cloud-init-custom.log
+  - ls -la /home/cluster/ >> /var/log/cloud-init-custom.log 2>&1

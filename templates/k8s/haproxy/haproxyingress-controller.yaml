@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: haproxy # Namespace for HAProxy Ingress controller
+  labels:
+    name: haproxy # Optional: label for the namespace itself
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: haproxy-ingress-serviceaccount
+  namespace: haproxy # Ensure SA is in the haproxy namespace
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: haproxy-ingress-clusterrolebinding # Name of the ClusterRoleBinding
+subjects:
+  - kind: ServiceAccount
+    name: haproxy-ingress-serviceaccount # Must match SA name
+    namespace: haproxy # Must match SA namespace
+roleRef:
+  kind: ClusterRole
+  name: haproxy-ingress-clusterrole # Must match ClusterRole name
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: haproxy
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "true"
+spec:
+  controller: haproxy.org/ingress-controller/haproxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haproxy-ingress # Name of the Deployment
+  namespace: haproxy # Ensure Deployment is in the haproxy namespace
+  labels:
+    app.kubernetes.io/name: haproxy-ingress
+    app.kubernetes.io/instance: haproxy
+spec:
+  replicas: 1 # Changed from 2 to 1 to match observed state, can be scaled later
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: haproxy-ingress
+      app.kubernetes.io/instance: haproxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: haproxy-ingress
+        app.kubernetes.io/instance: haproxy
+    spec:
+      serviceAccountName: haproxy-ingress-serviceaccount
+      nodeSelector:
+        workload-type: database # Schedule on master node (matches actual node label)
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: haproxy-ingress
+          image: haproxytech/kubernetes-ingress:3.2.12
+          args:
+            - --configmap=haproxy/haproxy-ingress-global-config # Points to ConfigMap in 'haproxy' namespace
+            - --ingress.class=haproxy # Must match IngressClass name and spec.ingressClassName on Ingress resources (required since v3.2)
+            - --configmap-tcp-services=haproxy/haproxy-tcp-services # TCP services for WebRTC
+            - --https-bind-port=4443 # Use port 4443 for HTTPS (dialog signaling)
+            - --http-bind-port=8080 # Use port 8080 for HTTP
+            # Optional: - --default-ssl-certificate=haproxy/your-default-tls-secret
+            # Optional: Add POD_NAME and POD_NAMESPACE if needed, though controller usually gets this
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: https
+              containerPort: 4443
+            - name: turn
+              containerPort: 5349
+            - name: stat
+              containerPort: 1024
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 1024
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1 # Short timeout for probes
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 1024
+            initialDelaySeconds: 10 # Give some time to start
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1" # Allow bursting up to 1 CPU
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            # The haproxytech/kubernetes-ingress image runs as non-root by default.
+            # If NET_BIND_SERVICE is needed (e.g. if binding to <1024, not the case here), add it:
+            # capabilities:
+            #   add: ["NET_BIND_SERVICE"]
+            #   drop: ["ALL"]
+            # readOnlyRootFilesystem: true # Good practice if image supports it

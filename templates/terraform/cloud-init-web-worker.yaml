@@ -1,0 +1,70 @@
+#cloud-config
+package_update: true
+packages:
+  - curl
+
+users:
+  - name: cluster
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: sudo
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+write_files:
+  - path: /etc/netplan/51-hcce-private.yaml
+    content: |
+      network:
+        version: 2
+        ethernets:
+          enp7s0:
+            dhcp4: true
+            dhcp4-overrides:
+              route-metric: 100
+    permissions: "0644"
+
+# Wait for user creation to complete before running commands
+bootcmd:
+  - sleep 5
+
+runcmd:
+  - netplan apply || true
+  - |
+    for i in $(seq 1 120); do
+      ip link set enp7s0 up 2>/dev/null || true
+      if ip -4 -o addr show dev enp7s0 2>/dev/null | grep -q 'inet '; then
+        if curl -k -s --connect-timeout 3 https://10.0.1.1:6443/version >/dev/null 2>&1; then
+          echo "Private network ready and master API reachable"
+          break
+        fi
+      fi
+      echo "Waiting for private network and master K3s API (attempt $i/120)..."
+      netplan apply 2>/dev/null || true
+      sleep 5
+    done
+
+  # Install K3s as additional control-plane node using pre-shared token
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 --token=${k3s_token} --flannel-iface=enp7s0 --node-ip=10.0.1.3 --disable-cloud-controller --disable traefik" sh -
+
+  # Wait for K3s server to fully start
+  - sleep 15
+  - while ! systemctl is-active --quiet k3s; do echo "Waiting for K3s server to start..."; sleep 5; done
+
+  # Ensure cluster user home directory exists with proper permissions
+  - mkdir -p /home/cluster
+  - chown cluster:cluster /home/cluster
+  - chmod 755 /home/cluster
+
+  # Create and setup .ssh directory
+  - mkdir -p /home/cluster/.ssh
+  - if [ -f /root/.ssh/authorized_keys ]; then cp /root/.ssh/authorized_keys /home/cluster/.ssh/authorized_keys; fi
+  - chown -R cluster:cluster /home/cluster/.ssh
+  - chmod 700 /home/cluster/.ssh
+  - if [ -f /home/cluster/.ssh/authorized_keys ]; then chmod 600 /home/cluster/.ssh/authorized_keys; fi
+
+  # Log completion
+  - echo "Cloud-init setup completed successfully" >> /var/log/cloud-init-custom.log
+  - echo "K3s server status:" >> /var/log/cloud-init-custom.log
+  - systemctl status k3s >> /var/log/cloud-init-custom.log 2>&1
+  - echo "Directory structure:" >> /var/log/cloud-init-custom.log
+  - ls -la /home/cluster/ >> /var/log/cloud-init-custom.log 2>&1

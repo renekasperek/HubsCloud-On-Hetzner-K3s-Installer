@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy-ingress-global-config # This name will be used in the deployment args
+  namespace: haproxy
+data:
+  # Global HAProxy settings optimized for WebRTC and signaling
+  # See HAProxy Ingress controller documentation for all available options:
+  # https://haproxy-ingress.github.io/docs/configuration/configmap/
+  global-config-snippet: |
+    tune.bufsize 33792
+  backend-config-snippet: |
+    option forwardfor
+    option http-pretend-keepalive
+
+  # DISABLE global SSL redirect to allow ACME challenges on HTTP
+  # ssl-redirect: "true"  # Commented out - we'll handle SSL redirect per ingress
+
+  # Configure proper HTTPS port for redirects
+  https-port: "443" # External HTTPS port (what users see)
+
+  # Extended timeouts for WebRTC signaling and long-lived connections
+  timeout-client: "30m" # Long timeout for WebRTC connections
+  timeout-server: "30m"
+  timeout-connect: "3s"
+  timeout-client-fin: "1h"
+  timeout-server-fin: "1h"
+  syslog-server: "address:stdout, format: raw, facility:daemon"
+
+  # Tell HAProxy it is behind a proxy and to trust X-Forwarded-* headers
+  # This is important if your Hetzner LoadBalancer terminates SSL or if there are other proxies.
+  # If HAProxy is directly exposed or Hetzner LB is TCP pass-through for SSL, this might not be needed or set to "false".
+  # Assuming Hetzner LB might be doing L4 passthrough for SSL to HAProxy, but L7 for non-SSL.
+  # If Hetzner LB does L7 for SSL, then "true" is good.
+  use-forwarded-headers: "true" # Or "false" depending on upstream LB. "ifpresent" is also an option.
+
+  # How to handle the X-Forwarded-For header
+  forwardfor: "ifpresent" # Common setting: append, ifheader, ifpresent, ignore
+
+
+  # Example: Customize log format (optional)
+  # log-format: '%ci:%cp [%t] %ft %b/%s %Tq/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r'
+
+  # Example: Number of worker threads for HAProxy (optional)
+  # nbthread: "4"

@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+from uuid import uuid4
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from services.core_images import normalize_core_app_images
+from services.volumes import (
+    DEFAULT_PGSQL_BACKUP_VOLUME,
+    DEFAULT_PGSQL_VOLUME,
+    DEFAULT_RETICULUM_VOLUME,
+    normalize_backup_volume,
+    normalize_data_volume,
+)
+
+
+class ClusterSize(str, Enum):
+    small = "small"
+    medium = "medium"
+    large = "large"
+
+
+SIZE_PRESETS: dict[str, dict[str, str]] = {
+    # Curated defaults per cluster_size (wizard + fallback when Hetzner API unavailable).
+    "small": {"master_server_type": "cx23", "web_server_type": "cpx12", "webrtc_server_type": "cpx12"},
+    "medium": {"master_server_type": "cpx13", "web_server_type": "cx23", "webrtc_server_type": "cx23"},
+    "large": {"master_server_type": "cpx32", "web_server_type": "cx23", "webrtc_server_type": "cpx13"},
+}
+
+ALLOWED_LOCATIONS = {"nbg1", "fsn1", "hel1", "ash", "hil"}  # default wizard options; API may return more
+
+
+class InstanceSpec(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    hetzner_api_token: str = ""
+    hub_domain: str = ""
+    admin_email: str = ""
+    location: str = "nbg1"
+    cluster_size: ClusterSize = ClusterSize.medium
+    master_server_type: str | None = None
+    worker_server_type: str | None = None
+    webrtc_server_type: str | None = None
+    ssh_public_key: str = ""
+    ssh_private_key_pem: str | None = None
+    ssh_key_generated: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    sketchfab_api_key: str = ""
+    tenor_api_key: str = ""
+    pgsql_volume_size: str = DEFAULT_PGSQL_VOLUME
+    reticulum_volume_size: str = DEFAULT_RETICULUM_VOLUME
+    pgsql_backup_volume_size: str = DEFAULT_PGSQL_BACKUP_VOLUME
+    firewall_hardened: bool = False
+    firewall_allow_ssh: bool = True
+    auto_repair_cluster_join: bool = True
+    persistent_volume_size: str = DEFAULT_PGSQL_VOLUME  # legacy alias for older saved specs
+    core_app_images: dict[str, dict[str, str]] = Field(default_factory=dict)
+    image_overrides: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("core_app_images", mode="before")
+    @classmethod
+    def normalize_core_app_images_field(cls, v: object) -> dict[str, dict[str, str]]:
+        if not v:
+            return normalize_core_app_images(None)
+        if isinstance(v, dict):
+            return normalize_core_app_images(v)
+        return normalize_core_app_images(None)
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not v or len(v) > 32:
+            raise ValueError("location must be a non-empty Hetzner location code")
+        return v
+
+    @field_validator("smtp_port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        if not 1 <= v <= 65535:
+            raise ValueError("smtp_port must be between 1 and 65535")
+        return v
+
+    @field_validator("pgsql_volume_size")
+    @classmethod
+    def validate_pgsql_volume(cls, v: str) -> str:
+        return normalize_data_volume(v)
+
+    @field_validator("reticulum_volume_size")
+    @classmethod
+    def validate_reticulum_volume(cls, v: str) -> str:
+        return normalize_data_volume(v, default=DEFAULT_RETICULUM_VOLUME)
+
+    @field_validator("pgsql_backup_volume_size")
+    @classmethod
+    def validate_pgsql_backup_volume(cls, v: str) -> str:
+        return normalize_backup_volume(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_volume_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        legacy = data.get("persistent_volume_size")
+        if legacy:
+            if not data.get("pgsql_volume_size"):
+                data["pgsql_volume_size"] = legacy
+            if not data.get("pgsql_backup_volume_size"):
+                data["pgsql_backup_volume_size"] = legacy
+        if not data.get("reticulum_volume_size"):
+            data["reticulum_volume_size"] = DEFAULT_RETICULUM_VOLUME
+        return data
+
+    def resolved_server_types(self) -> dict[str, str]:
+        preset = SIZE_PRESETS[self.cluster_size.value]
+        return {
+            "master_server_type": self.master_server_type or preset["master_server_type"],
+            "webrtc_server_type": self.webrtc_server_type or preset["webrtc_server_type"],
+            "web_server_type": self.worker_server_type or preset["web_server_type"],
+        }
+
+
+class InstanceStatus(BaseModel):
+    phase: str = "idle"
+    step: int = 0
+    state: str = "pending"
+    message: str = ""
+    error: str | None = None
+    intervention: str | None = None  # e.g. server_types, credentials
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class InstanceSummary(BaseModel):
+    id: str
+    hub_domain: str
+    state: str
+    phase: str
+    created_at: str
+
+
+class ResourcesSnapshot(BaseModel):
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    pods: list[dict[str, Any]] = Field(default_factory=list)
+    deployments: list[dict[str, Any]] = Field(default_factory=list)
+    ingresses: list[dict[str, Any]] = Field(default_factory=list)
+    certificates: list[dict[str, Any]] = Field(default_factory=list)
+    loadbalancers: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
+class HealthCheck(BaseModel):
+    id: str
+    name: str
+    group: str
+    status: str  # ok | warn | fail | skip | unknown
+    detail: str
+    hint: str = ""
+
+
+class HealthSummary(BaseModel):
+    overall: str
+    checks: list[HealthCheck] = Field(default_factory=list)
+
+
+class ClusterJoinServer(BaseModel):
+    name: str
+    role: str
+    public_ip: str = ""
+    private_ip: str = ""
+    hetzner_status: str = ""
+    k8s_ready: bool = False
+    k8s_present: bool = False
+    issue: str | None = None
+
+
+class ClusterJoinStatus(BaseModel):
+    expected_nodes: int = 3
+    joined_ready: int = 0
+    joined_not_ready: int = 0
+    missing: list[str] = Field(default_factory=list)
+    stuck_seconds: int = 0
+    servers: list[ClusterJoinServer] = Field(default_factory=list)
+    suggested_action: str = "wait"  # wait | repair | none
+    error: str | None = None
+
+
+class HetznerAudit(BaseModel):
+    clean: bool
+    issues: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    has_billable_leftovers: bool = False
+    servers: list[dict] = Field(default_factory=list)
+    networks: list[dict] = Field(default_factory=list)
+    firewalls: list[dict] = Field(default_factory=list)
+    load_balancers: list[dict] = Field(default_factory=list)
+    volumes: list[int] = Field(default_factory=list)
+    placement_groups: list[dict] = Field(default_factory=list)
+    ssh_keys: list[dict] = Field(default_factory=list)

@@ -1,0 +1,28 @@
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: haproxy-ingress-clusterrole # Name of the ClusterRole
+rules:
+  - apiGroups: [""]
+    resources:
+      ["configmaps", "endpoints", "nodes", "pods", "secrets", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "update"] # For updating service status
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["discovery.k8s.io"] # For EndpointSlices
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # --- ADDED RULE FOR CRD DISCOVERY (FIXES THE PERMISSION ERROR) ---
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]

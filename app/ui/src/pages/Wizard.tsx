@@ -1,0 +1,939 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { api } from "../api";
+import { ClusterTopology } from "../components/ClusterTopology";
+
+const STEPS = [
+  "Credentials",
+  "Domain & email",
+  "Machines & SSH",
+  "SMTP",
+  "Container images",
+  "Optional APIs",
+  "Review",
+];
+
+const CORE_APPS = ["reticulum", "hubs", "spoke"] as const;
+type CoreApp = (typeof CORE_APPS)[number];
+type ImageMode = "default" | "pin" | "custom";
+
+const DATA_VOLUME_GB = [10, 20, 50, 100, 200, 500] as const;
+const BACKUP_VOLUME_GB = [10, 20] as const;
+
+function volumeGi(gb: number) {
+  return `${gb}Gi`;
+}
+
+function volumeGbFromGi(gi: string | undefined, fallback: number) {
+  const m = String(gi || "").match(/^(\d+)Gi$/);
+  return m ? Number(m[1]) : fallback;
+}
+
+function formatVolumeLabel(gb: number) {
+  return `${gb} GB`;
+}
+
+type AppImageCfg = { mode: ImageMode; tag: string; image: string };
+
+const APP_DEFAULTS: Record<CoreApp, { repo: string; tag: string; label: string }> = {
+  reticulum: { repo: "hubsfoundation/reticulum", tag: "stable-latest", label: "Reticulum" },
+  hubs: { repo: "hubsfoundation/hubs", tag: "stable-latest", label: "Hubs" },
+  spoke: { repo: "hubsfoundation/spoke", tag: "stable-latest", label: "Spoke" },
+};
+
+const TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const IMAGE_RE = /^[a-z0-9]([a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*)?(:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|@sha256:[a-f0-9]{64})?$/i;
+
+function getAppImageCfg(spec: Spec, app: CoreApp): AppImageCfg {
+  const all = (spec.core_app_images as Record<string, AppImageCfg> | undefined) || {};
+  const cfg = all[app];
+  const mode = cfg?.mode === "pin" || cfg?.mode === "custom" ? cfg.mode : "default";
+  return { mode, tag: cfg?.tag || "", image: cfg?.image || "" };
+}
+
+function resolveAppImagePreview(app: CoreApp, cfg: AppImageCfg): string {
+  const meta = APP_DEFAULTS[app];
+  if (cfg.mode === "custom" && cfg.image.trim()) return cfg.image.trim();
+  if (cfg.mode === "pin" && cfg.tag.trim()) return `${meta.repo}:${cfg.tag.trim()}`;
+  return `${meta.repo}:${meta.tag}`;
+}
+
+function appImageValid(cfg: AppImageCfg): boolean {
+  if (cfg.mode === "default") return true;
+  if (cfg.mode === "pin") return Boolean(cfg.tag.trim()) && TAG_RE.test(cfg.tag.trim());
+  if (cfg.mode === "custom") {
+    const image = cfg.image.trim();
+    return Boolean(image) && !image.includes(" ") && IMAGE_RE.test(image);
+  }
+  return false;
+}
+
+type Spec = Record<string, unknown>;
+
+type Location = { name: string; description: string; city: string; country: string };
+
+type ServerType = {
+  name: string;
+  description: string;
+  cores: number;
+  memory: number;
+  disk: number;
+  category: string;
+  available: boolean;
+  recommended: boolean;
+  price_monthly_gross: string | null;
+};
+
+type Presets = Record<string, { master_server_type: string; web_server_type: string; webrtc_server_type: string }>;
+
+function formatTypeLabel(t: ServerType) {
+  const price = t.price_monthly_gross ? ` · €${t.price_monthly_gross}/mo` : "";
+  return `${t.name} — ${t.cores} vCPU, ${t.memory} GB RAM, ${t.disk} GB${price}`;
+}
+
+export function WizardPage({ instanceId }: { instanceId: string }) {
+  const nav = useNavigate();
+  const [searchParams] = useSearchParams();
+  const initialStep = Math.min(Math.max(Number(searchParams.get("step") || "0"), 0), STEPS.length - 1);
+  const [step, setStep] = useState(initialStep);
+  const [spec, setSpec] = useState<Spec>({});
+  const specRef = useRef<Spec>({});
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [tokenOk, setTokenOk] = useState<boolean | null>(null);
+  const [tokenMsg, setTokenMsg] = useState("");
+  const [tokenValidating, setTokenValidating] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [serverTypes, setServerTypes] = useState<ServerType[]>([]);
+  const [presets, setPresets] = useState<Presets>({});
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [serverTypesOk, setServerTypesOk] = useState<boolean | null>(null);
+  const [serverTypesMsg, setServerTypesMsg] = useState("");
+  const presetAppliedRef = useRef(false);
+
+  useEffect(() => {
+    api<{ spec: Spec }>(`/instances/${instanceId}`).then((d) => {
+      setSpec(d.spec);
+      specRef.current = d.spec;
+    });
+  }, [instanceId]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, []);
+
+  const location = (spec.location as string) || "nbg1";
+
+  useEffect(() => {
+    presetAppliedRef.current = false;
+  }, [location]);
+
+  const loadCatalog = useCallback(async () => {
+    setCatalogLoading(true);
+    setCatalogError("");
+    try {
+      const [locRes, typesRes, presetRes] = await Promise.all([
+        api<{ locations: Location[] }>(`/instances/${instanceId}/hetzner/locations`),
+        api<{ server_types: ServerType[] }>(`/instances/${instanceId}/hetzner/server-types?location=${encodeURIComponent(location)}`),
+        api<{ presets: Presets }>(`/instances/${instanceId}/hetzner/presets?location=${encodeURIComponent(location)}`),
+      ]);
+      setLocations(locRes.locations);
+      setServerTypes(typesRes.server_types);
+      setPresets(presetRes.presets);
+      setServerTypesOk(null);
+      setServerTypesMsg("");
+    } catch (e) {
+      setCatalogError(e instanceof Error ? e.message : "Could not load Hetzner catalog");
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [instanceId, location]);
+
+  useEffect(() => {
+    if (step === 2 && tokenOk === true) {
+      presetAppliedRef.current = false;
+      void loadCatalog();
+    }
+  }, [step, tokenOk, loadCatalog]);
+
+  useEffect(() => {
+    if (step > 0 && tokenOk !== true) {
+      setStep(0);
+    }
+  }, [step, tokenOk]);
+
+  const saveSpec = useCallback(
+    async (next?: Spec) => {
+      const payload = next ?? specRef.current;
+      specRef.current = payload;
+      setSpec(payload);
+      await api(`/instances/${instanceId}/spec`, {
+        method: "PUT",
+        body: JSON.stringify({ spec: payload }),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    },
+    [instanceId]
+  );
+
+  useEffect(() => {
+    if (step !== 2 || catalogLoading || !presets.medium || presetAppliedRef.current) return;
+    const hasCustom =
+      specRef.current.master_server_type ||
+      specRef.current.worker_server_type ||
+      specRef.current.webrtc_server_type;
+    if (!hasCustom) {
+      presetAppliedRef.current = true;
+      const size = (specRef.current.cluster_size as "small" | "medium" | "large") || "medium";
+      const p = presets[size] || presets.medium;
+      void saveSpec({
+        ...specRef.current,
+        cluster_size: size,
+        master_server_type: p.master_server_type,
+        worker_server_type: p.web_server_type,
+        webrtc_server_type: p.webrtc_server_type,
+      });
+    }
+  }, [step, catalogLoading, presets, saveSpec]);
+
+  const patchLocal = (patch: Spec) => {
+    setSpec((prev) => {
+      const next = { ...prev, ...patch };
+      specRef.current = next;
+      return next;
+    });
+  };
+
+  const scheduleBlurSave = () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      void saveSpec();
+    }, 400);
+  };
+
+  const patchAndSave = (patch: Spec) => {
+    const next = { ...specRef.current, ...patch };
+    void saveSpec(next);
+  };
+
+  const patchAppImage = (app: CoreApp, patch: Partial<AppImageCfg>) => {
+    const all = { ...((specRef.current.core_app_images as Record<string, AppImageCfg>) || {}) };
+    all[app] = { ...getAppImageCfg(specRef.current, app), ...patch };
+    patchLocal({ core_app_images: all });
+  };
+
+  const saveAppImage = (app: CoreApp, patch: Partial<AppImageCfg>) => {
+    const all = { ...((specRef.current.core_app_images as Record<string, AppImageCfg>) || {}) };
+    all[app] = { ...getAppImageCfg(specRef.current, app), ...patch };
+    patchAndSave({ core_app_images: all });
+  };
+
+  const applySizePreset = (size: "small" | "medium" | "large") => {
+    const p = presets[size];
+    if (p) {
+      patchAndSave({
+        cluster_size: size,
+        master_server_type: p.master_server_type,
+        worker_server_type: p.web_server_type,
+        webrtc_server_type: p.webrtc_server_type,
+      });
+    } else {
+      patchAndSave({ cluster_size: size });
+    }
+    setServerTypesOk(null);
+  };
+
+  const resolvedTypes = useMemo(() => {
+    const size = (spec.cluster_size as string) || "medium";
+    const fallback = presets[size];
+    return {
+      master: (spec.master_server_type as string) || fallback?.master_server_type || "",
+      web: (spec.worker_server_type as string) || fallback?.web_server_type || "",
+      webrtc: (spec.webrtc_server_type as string) || fallback?.webrtc_server_type || "",
+    };
+  }, [spec, presets]);
+
+  const validateToken = async (): Promise<boolean> => {
+    const token = String(specRef.current.hetzner_api_token || "").trim();
+    if (!token) {
+      setTokenOk(false);
+      setTokenMsg("Enter your Hetzner Cloud API token first.");
+      return false;
+    }
+    setTokenValidating(true);
+    try {
+      await saveSpec();
+      const r = await api<{ ok: boolean; message: string }>(`/instances/${instanceId}/validate-hetzner`, { method: "POST" });
+      setTokenOk(r.ok);
+      setTokenMsg(r.message);
+      return r.ok;
+    } catch (e) {
+      setTokenOk(false);
+      setTokenMsg(e instanceof Error ? e.message : "Token validation failed");
+      return false;
+    } finally {
+      setTokenValidating(false);
+    }
+  };
+
+  const validateServerTypes = async () => {
+    await saveSpec();
+    const r = await api<{ ok: boolean; message: string }>(`/instances/${instanceId}/validate-server-types`, { method: "POST" });
+    setServerTypesOk(r.ok);
+    setServerTypesMsg(r.message);
+    return r.ok;
+  };
+
+  const generateSsh = async () => {
+    const r = await api<{ public_key: string }>(`/instances/${instanceId}/ssh/generate`, { method: "POST" });
+    patchAndSave({ ssh_public_key: r.public_key, ssh_key_generated: true });
+  };
+
+  const goNext = async () => {
+    await saveSpec();
+    if (step === 0) {
+      const ok = await validateToken();
+      if (!ok) return;
+    }
+    if (step === 2) {
+      const ok = await validateServerTypes();
+      if (!ok) return;
+    }
+    setStep((s) => s + 1);
+  };
+
+  const canContinue = useMemo(() => {
+    switch (step) {
+      case 0:
+        return Boolean(String(spec.hetzner_api_token || "").trim()) && tokenOk === true && !tokenValidating;
+      case 1:
+        return Boolean(spec.hub_domain && spec.admin_email);
+      case 2:
+        return Boolean(
+          spec.ssh_public_key &&
+            spec.ssh_key_generated &&
+            spec.location &&
+            resolvedTypes.master &&
+            resolvedTypes.web &&
+            resolvedTypes.webrtc &&
+            serverTypes.length > 0
+        );
+      case 3:
+        return Boolean(
+          spec.smtp_host && spec.smtp_user && spec.smtp_password && spec.smtp_port && spec.smtp_from
+        );
+      case 4:
+        return CORE_APPS.every((app) => appImageValid(getAppImageCfg(spec, app)));
+      default:
+        return true;
+    }
+  }, [step, spec, tokenOk, tokenValidating, resolvedTypes, serverTypes.length]);
+
+  const startCreate = async () => {
+    await saveSpec();
+    await api(`/instances/${instanceId}/create`, { method: "POST" });
+    nav(`/instances/${instanceId}`);
+  };
+
+  const locationOptions = locations.length
+    ? locations
+    : ["nbg1", "fsn1", "hel1", "ash", "hil"].map((name) => ({ name, description: "", city: "", country: "" }));
+
+  return (
+    <div className="wizard-workspace">
+    <div className="wizard-grid">
+      <nav aria-label="Setup steps" className="step-rail-wrap">
+        <ol className="step-rail">
+          {STEPS.map((label, i) => {
+            const done = i < step;
+            const current = i === step;
+            return (
+              <li key={label} className="step-rail-item">
+                <button
+                  type="button"
+                  className={`step-rail-btn${current ? " is-current" : ""}${done ? " is-done" : ""}`}
+                  disabled={!done}
+                  onClick={() => done && setStep(i)}
+                >
+                  <span className="step-rail-num">{done ? "✓" : i + 1}</span>
+                  {label}
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
+
+      <section className="step-enter wizard-form-card">
+        {step === 0 && (
+          <>
+            <h2>Credentials</h2>
+            <p className="muted">Your Hetzner Cloud API token. Validate it before continuing.</p>
+            <div className="field">
+              <label htmlFor="token">API token</label>
+              <input
+                id="token"
+                type="password"
+                value={(spec.hetzner_api_token as string) || ""}
+                onChange={(e) => {
+                  patchLocal({ hetzner_api_token: e.target.value });
+                  setTokenOk(null);
+                  setTokenMsg("");
+                }}
+                onBlur={scheduleBlurSave}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn btn-outline"
+              disabled={tokenValidating || !String(spec.hetzner_api_token || "").trim()}
+              onClick={() => void validateToken()}
+            >
+              {tokenValidating ? "Validating…" : "Validate token"}
+            </button>
+            {tokenOk === false && (
+              <p className="bad-text validate-in" style={{ marginTop: 12 }}>
+                {tokenMsg || "Token invalid — fix it and validate again before continuing."}
+              </p>
+            )}
+            {tokenOk === true && (
+              <p className="ok-text validate-in" style={{ marginTop: 12 }}>
+                {tokenMsg || "Token valid"}
+              </p>
+            )}
+          </>
+        )}
+
+        {step === 1 && (
+          <>
+            <h2>Domain & email</h2>
+            <div className="field">
+              <label htmlFor="hub">Hub domain</label>
+              <input
+                id="hub"
+                value={(spec.hub_domain as string) || ""}
+                onChange={(e) => patchLocal({ hub_domain: e.target.value })}
+                onBlur={scheduleBlurSave}
+                placeholder="hubs.example.com"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="email">Admin email</label>
+              <input
+                id="email"
+                type="email"
+                value={(spec.admin_email as string) || ""}
+                onChange={(e) => patchLocal({ admin_email: e.target.value })}
+                onBlur={scheduleBlurSave}
+              />
+            </div>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <h2>Machines & SSH</h2>
+            <p className="muted">Server types are loaded live from Hetzner for your region.</p>
+
+            <div className="field">
+              <label htmlFor="loc">Location</label>
+              <select
+                id="loc"
+                value={location}
+                onChange={(e) => {
+                  patchAndSave({ location: e.target.value });
+                  setServerTypesOk(null);
+                }}
+              >
+                {locationOptions.map((l) => (
+                  <option key={l.name} value={l.name}>
+                    {l.name}
+                    {l.city ? ` — ${l.city}` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {catalogLoading && <p className="muted">Loading available server types…</p>}
+            {catalogError && (
+              <div className="panel bad-text" style={{ marginBottom: 12 }}>
+                {catalogError}
+                <button type="button" className="btn btn-outline" style={{ marginTop: 8 }} onClick={() => void loadCatalog()}>
+                  Retry catalog
+                </button>
+              </div>
+            )}
+
+            <div className="field">
+              <label>Cluster size preset</label>
+              <div className="segmented">
+                {(["small", "medium", "large"] as const).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`segmented-btn${spec.cluster_size === s ? " is-active" : ""}`}
+                    onClick={() => applySizePreset(s)}
+                    disabled={catalogLoading}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+              {presets[(spec.cluster_size as string) || "medium"] && (
+                <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
+                  Preset maps to master {presets[(spec.cluster_size as string) || "medium"].master_server_type}, web{" "}
+                  {presets[(spec.cluster_size as string) || "medium"].web_server_type}, webrtc{" "}
+                  {presets[(spec.cluster_size as string) || "medium"].webrtc_server_type}
+                </p>
+              )}
+            </div>
+
+            {serverTypes.length > 0 && (
+              <>
+                <div className="field">
+                  <label htmlFor="master-type">Master (database) server type</label>
+                  <select
+                    id="master-type"
+                    value={resolvedTypes.master}
+                    onChange={(e) => {
+                      patchAndSave({ master_server_type: e.target.value });
+                      setServerTypesOk(null);
+                    }}
+                  >
+                    {serverTypes.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {formatTypeLabel(t)}
+                        {t.recommended ? " ★" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="web-type">Web worker server type</label>
+                  <select
+                    id="web-type"
+                    value={resolvedTypes.web}
+                    onChange={(e) => {
+                      patchAndSave({ worker_server_type: e.target.value });
+                      setServerTypesOk(null);
+                    }}
+                  >
+                    {serverTypes.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {formatTypeLabel(t)}
+                        {t.recommended ? " ★" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="webrtc-type">WebRTC worker server type</label>
+                  <select
+                    id="webrtc-type"
+                    value={resolvedTypes.webrtc}
+                    onChange={(e) => {
+                      patchAndSave({ webrtc_server_type: e.target.value });
+                      setServerTypesOk(null);
+                    }}
+                  >
+                    {serverTypes.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {formatTypeLabel(t)}
+                        {t.recommended ? " ★" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button type="button" className="btn btn-outline" onClick={() => void validateServerTypes()}>
+                  Validate server types
+                </button>
+                {serverTypesOk !== null && (
+                  <p className={serverTypesOk ? "ok-text" : "bad-text"} style={{ marginTop: 12 }}>
+                    {serverTypesMsg}
+                  </p>
+                )}
+              </>
+            )}
+
+            <div className="cluster" style={{ marginTop: 16 }}>
+              <p className="cluster-title">Storage volumes</p>
+              <p className="muted" style={{ marginTop: 0 }}>
+                Hetzner Cloud block volumes — minimum 10 GB. Sizes bill continuously until deleted.
+              </p>
+              <div className="field">
+                <label htmlFor="pgsql-volume">PostgreSQL database</label>
+                <select
+                  id="pgsql-volume"
+                  value={volumeGbFromGi(spec.pgsql_volume_size as string, 10)}
+                  onChange={(e) => patchAndSave({ pgsql_volume_size: volumeGi(Number(e.target.value)) })}
+                >
+                  {DATA_VOLUME_GB.map((gb) => (
+                    <option key={gb} value={gb}>
+                      {formatVolumeLabel(gb)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="reticulum-volume">Reticulum (assets & uploads)</label>
+                <select
+                  id="reticulum-volume"
+                  value={volumeGbFromGi(spec.reticulum_volume_size as string, 10)}
+                  onChange={(e) => patchAndSave({ reticulum_volume_size: volumeGi(Number(e.target.value)) })}
+                >
+                  {DATA_VOLUME_GB.map((gb) => (
+                    <option key={gb} value={gb}>
+                      {formatVolumeLabel(gb)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="pgsql-backup-volume">PostgreSQL backup</label>
+                <select
+                  id="pgsql-backup-volume"
+                  value={volumeGbFromGi(spec.pgsql_backup_volume_size as string, 10)}
+                  onChange={(e) => patchAndSave({ pgsql_backup_volume_size: volumeGi(Number(e.target.value)) })}
+                >
+                  {BACKUP_VOLUME_GB.map((gb) => (
+                    <option key={gb} value={gb}>
+                      {formatVolumeLabel(gb)}
+                    </option>
+                  ))}
+                </select>
+                <p className="muted" style={{ marginTop: 8, marginBottom: 0, fontSize: 13 }}>
+                  Used only by the database backup CronJob — not the live Postgres data volume.
+                </p>
+              </div>
+            </div>
+
+            <div className="cluster" style={{ marginTop: 16 }}>
+              <p className="cluster-title">SSH access</p>
+              {!spec.ssh_key_generated ? (
+                <>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    The installer generates an Ed25519 key pair and keeps the private key for kubeconfig fetch and node
+                    hardening.
+                  </p>
+                  <button type="button" className="btn btn-outline" onClick={() => void generateSsh()}>
+                    Generate key pair
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="ok-text" style={{ marginTop: 0, marginBottom: 8 }}>Key pair generated</p>
+                  <div className="ssh-key-preview" aria-readonly="true">
+                    {(spec.ssh_public_key as string) || ""}
+                  </div>
+                  <button type="button" className="btn btn-ghost" style={{ marginTop: 8 }} onClick={() => void generateSsh()}>
+                    Regenerate key pair
+                  </button>
+                  <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                    Regenerating replaces the key before provisioning starts.
+                  </p>
+                </>
+              )}
+            </div>
+          </>
+        )}
+
+        {step === 3 && (
+          <>
+            <h2>SMTP</h2>
+            <div className="field">
+              <label htmlFor="smtp-host">Host</label>
+              <input
+                id="smtp-host"
+                value={(spec.smtp_host as string) || ""}
+                onChange={(e) => patchLocal({ smtp_host: e.target.value })}
+                onBlur={scheduleBlurSave}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="smtp-port">Port</label>
+              <input
+                id="smtp-port"
+                type="number"
+                value={(spec.smtp_port as number) || 587}
+                placeholder="587"
+                onChange={(e) => patchLocal({ smtp_port: Number(e.target.value) })}
+                onBlur={scheduleBlurSave}
+              />
+              <p className="muted" style={{ marginTop: 6, marginBottom: 0 }}>
+                Default: <strong>587</strong> (STARTTLS). Hetzner blocks outbound SMTP on{" "}
+                <strong>465</strong> and <strong>22</strong> — do not use those. Port{" "}
+                <strong>2020</strong> may work with some providers; prefer 587 when available.
+              </p>
+            </div>
+            <div className="field">
+              <label htmlFor="smtp-user">User</label>
+              <input
+                id="smtp-user"
+                value={(spec.smtp_user as string) || ""}
+                onChange={(e) => patchLocal({ smtp_user: e.target.value })}
+                onBlur={scheduleBlurSave}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="smtp-from">Sender email</label>
+              <input
+                id="smtp-from"
+                type="email"
+                value={(spec.smtp_from as string) || ""}
+                onChange={(e) => patchLocal({ smtp_from: e.target.value })}
+                onBlur={scheduleBlurSave}
+                placeholder="you@yourdomain.com"
+              />
+              <p className="muted" style={{ marginTop: 6, marginBottom: 0 }}>
+                From address on outgoing mail. Must be a mailbox your SMTP provider allows (often your login
+                email, not <code>noreply@hub-domain</code>).
+              </p>
+            </div>
+            <div className="field">
+              <label htmlFor="smtp-pass">Password</label>
+              <input
+                id="smtp-pass"
+                type="password"
+                value={(spec.smtp_password as string) || ""}
+                onChange={(e) => patchLocal({ smtp_password: e.target.value })}
+                onBlur={scheduleBlurSave}
+              />
+            </div>
+          </>
+        )}
+
+        {step === 4 && (
+          <>
+            <h2>Container images</h2>
+            <p className="muted">
+              Choose Hubs Foundation defaults, pin a tag, or use your own public image. Private registries
+              (password-protected GHCR, Docker Hub, etc.) are not supported yet.
+            </p>
+            <div className="cluster">
+              <p className="cluster-title">Core apps</p>
+            {CORE_APPS.map((app) => {
+              const cfg = getAppImageCfg(spec, app);
+              const meta = APP_DEFAULTS[app];
+              return (
+                <div key={app} className="app-image-block">
+                  <h3 style={{ fontSize: 16, margin: "0 0 12px" }}>{meta.label}</h3>
+                  <div className="image-options">
+                    <label className="image-option">
+                      <input
+                        type="radio"
+                        name={`${app}-mode`}
+                        checked={cfg.mode === "default"}
+                        onChange={() => saveAppImage(app, { mode: "default", tag: "", image: "" })}
+                      />
+                      <div className="image-option-body">
+                        <div className="image-option-title">Hubs Foundation default</div>
+                        <div className="image-option-desc">
+                          {meta.repo}:{meta.tag}
+                        </div>
+                      </div>
+                    </label>
+                    <label className="image-option">
+                      <input
+                        type="radio"
+                        name={`${app}-mode`}
+                        checked={cfg.mode === "pin"}
+                        onChange={() => patchAppImage(app, { mode: "pin", image: "" })}
+                      />
+                      <div className="image-option-body">
+                        <div className="image-option-title">Pin a version tag</div>
+                        <div className="image-option-desc">Same repository, specific tag on Hubs Foundation.</div>
+                        {cfg.mode === "pin" && (
+                          <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
+                            <input
+                              id={`${app}-tag`}
+                              value={cfg.tag}
+                              placeholder="stable-latest"
+                              onChange={(e) => patchAppImage(app, { tag: e.target.value })}
+                              onBlur={() => void saveSpec()}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                    <label className="image-option">
+                      <input
+                        type="radio"
+                        name={`${app}-mode`}
+                        checked={cfg.mode === "custom"}
+                        onChange={() => patchAppImage(app, { mode: "custom", tag: "" })}
+                      />
+                      <div className="image-option-body">
+                        <div className="image-option-title">Custom public image</div>
+                        <div className="image-option-desc">Full image reference, e.g. ghcr.io/org/hubs:1.0</div>
+                        {cfg.mode === "custom" && (
+                          <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
+                            <input
+                              id={`${app}-image`}
+                              value={cfg.image}
+                              placeholder={`my-registry/${app}:latest`}
+                              onChange={(e) => patchAppImage(app, { image: e.target.value })}
+                              onBlur={() => void saveSpec()}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  </div>
+                  <div className="image-preview" aria-live="polite">
+                    Deploys as: {resolveAppImagePreview(app, cfg)}
+                  </div>
+                </div>
+              );
+            })}
+            </div>
+          </>
+        )}
+
+        {step === 5 && (
+          <>
+            <h2>Optional APIs</h2>
+            <div className="field">
+              <label>Sketchfab API key</label>
+              <input
+                value={(spec.sketchfab_api_key as string) || ""}
+                onChange={(e) => patchLocal({ sketchfab_api_key: e.target.value })}
+                onBlur={scheduleBlurSave}
+              />
+            </div>
+            <div className="field">
+              <label>Tenor API key</label>
+              <input
+                value={(spec.tenor_api_key as string) || ""}
+                onChange={(e) => patchLocal({ tenor_api_key: e.target.value })}
+                onBlur={scheduleBlurSave}
+              />
+            </div>
+          </>
+        )}
+
+        {step === 6 && (
+          <>
+            <h2>Review</h2>
+            <div className="review-topology">
+              <ClusterTopology />
+            </div>
+            <div className="review-grid">
+              <div className="cluster">
+                <p className="cluster-title">Infrastructure</p>
+                <p><strong>Domain:</strong> {String(spec.hub_domain || "—")}</p>
+                <p><strong>Location:</strong> {String(spec.location || "nbg1")}</p>
+                <p><strong>Size:</strong> {String(spec.cluster_size || "medium")}</p>
+                <p><strong>Master:</strong> {resolvedTypes.master || "—"}</p>
+                <p><strong>Web:</strong> {resolvedTypes.web || "—"}</p>
+                <p><strong>WebRTC:</strong> {resolvedTypes.webrtc || "—"}</p>
+                <p><strong>PostgreSQL volume:</strong> {formatVolumeLabel(volumeGbFromGi(spec.pgsql_volume_size as string, 10))}</p>
+                <p><strong>Reticulum volume:</strong> {formatVolumeLabel(volumeGbFromGi(spec.reticulum_volume_size as string, 10))}</p>
+                <p><strong>Postgres backup volume:</strong> {formatVolumeLabel(volumeGbFromGi(spec.pgsql_backup_volume_size as string, 10))}</p>
+              </div>
+              <div className="cluster">
+                <p className="cluster-title">Mail & admin</p>
+                <p><strong>Admin:</strong> {String(spec.admin_email || "—")}</p>
+                <p><strong>SMTP sender:</strong> {String(spec.smtp_from || "—")}</p>
+              </div>
+              <div className="cluster">
+                <p className="cluster-title">Container images</p>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {CORE_APPS.map((app) => (
+                    <li key={app} style={{ fontFamily: "var(--font-mono)", fontSize: 13, marginBottom: 4 }}>
+                      {APP_DEFAULTS[app].label}: {resolveAppImagePreview(app, getAppImageCfg(spec, app))}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            <p className="muted">Create cluster will call Hetzner and run ~30–60+ minutes unattended.</p>
+            <button type="button" className="btn btn-primary" onClick={() => setConfirmOpen(true)}>
+              Create cluster
+            </button>
+          </>
+        )}
+
+        <div className="wizard-footer">
+          <button type="button" className="btn btn-ghost" disabled={step === 0} onClick={() => setStep((s) => s - 1)}>
+            Back
+          </button>
+          <span className="muted">{saved ? "Saved" : ""}</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            {step === 5 && (
+              <button type="button" className="btn btn-outline" onClick={() => void goNext()}>
+                Skip
+              </button>
+            )}
+            {step < 6 && (
+              <button type="button" className="btn btn-primary" disabled={!canContinue} onClick={() => void goNext()}>
+                Continue
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <aside className="context-panel-wrap">
+        <div className="context-panel">
+        <p className="context-panel-header">Context</p>
+        {step === 0 && <p>Token is stored only under <code>/data</code> on this machine. Click <strong>Validate token</strong> — you cannot continue until Hetzner accepts it.</p>}
+        {step === 1 && spec.hub_domain ? (
+          <>
+            <p className="muted" style={{ marginTop: 0 }}>TLS terminated at HAProxy (cert-manager).</p>
+            <ul style={{ paddingLeft: 18, margin: "12px 0 0" }}>
+              <li>https://{String(spec.hub_domain)}</li>
+              <li>assets.{String(spec.hub_domain)}</li>
+              <li>stream.{String(spec.hub_domain)}</li>
+              <li>cors.{String(spec.hub_domain)}</li>
+            </ul>
+          </>
+        ) : step === 1 ? (
+          <p style={{ margin: 0 }}>TLS terminated at HAProxy (cert-manager).</p>
+        ) : null}
+        {step === 2 && <ClusterTopology compact />}
+        {step === 3 && <p style={{ margin: 0 }}>Required for invites and password reset mail.</p>}
+        {step === 4 && (
+          <p>
+            Reticulum, Hubs, and Spoke are the core app containers. Other HCCE images (Postgres, HAProxy sidecars,
+            etc.) stay on the template defaults.
+          </p>
+        )}
+        {step === 5 && <p>Skip if unused — features stay limited.</p>}
+        {step === 6 && (
+          <p style={{ margin: "16px 0 0" }}>
+            Phase B (workloads) starts automatically after the cluster is ready — no second click. CCM, CSI, and
+            metrics-server are installed but not shown on the diagram.
+          </p>
+        )}
+        </div>
+      </aside>
+
+      {confirmOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+          <div className="modal-card">
+            <h3 id="confirm-title">Start provisioning?</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              {String(spec.hub_domain)} · {String(spec.location)} · {resolvedTypes.master}/{resolvedTypes.web}/{resolvedTypes.webrtc}
+            </p>
+            <p className="muted" style={{ marginBottom: 0 }}>
+              This creates Hetzner Cloud servers, a load balancer, and volumes on your account. Those resources bill
+              continuously until you delete them in the Hetzner Cloud Console.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-outline" onClick={() => setConfirmOpen(false)}>Cancel</button>
+              <button type="button" className="btn btn-primary" onClick={() => { setConfirmOpen(false); void startCreate(); }}>Start provisioning</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+    </div>
+  );
+}

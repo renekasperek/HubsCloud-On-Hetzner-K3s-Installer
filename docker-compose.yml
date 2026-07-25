@@ -1,0 +1,15 @@
+services:
+  installer:
+    container_name: HCCE-on-Hetzner-installer
+    image: hcce-on-hetzner-installer:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - TEMPLATES_DIR=/opt/templates
+      - DATA_DIR=/data
+      - PYTHONUNBUFFERED=1

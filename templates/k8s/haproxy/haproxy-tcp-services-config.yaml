@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy-tcp-services
+  namespace: haproxy
+data:
+  # TURN server (coturn) for WebRTC NAT traversal - direct to WebRTC worker node
+  5349: hcce/coturn:5349
+  # Dialog signaling server for WebRTC
+  #4443: hcce/dialog:4443
