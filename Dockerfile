@@ -1,7 +1,10 @@
 FROM node:22-bookworm AS ui-build
 WORKDIR /build
 COPY app/ui/package.json app/ui/package-lock.json* ./
-RUN npm install
+# Skip native postinstall scripts during npm ci to avoid esbuild ETXTBSY on Docker Desktop (Mac).
+# Vite still works via esbuild's JS fallback; native binary install is best-effort.
+RUN npm ci --ignore-scripts \
+    && (node node_modules/esbuild/install.js || true)
 COPY app/ui/ ./
 RUN npm run build
 

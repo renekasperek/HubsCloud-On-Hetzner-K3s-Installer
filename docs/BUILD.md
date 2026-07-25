@@ -41,6 +41,24 @@ Copy-out: `cp -R installer ~/elsewhere && cd ~/elsewhere && docker compose up --
 
 Single-process: uvicorn serves API + static SPA from `app/ui/dist`.
 
+## Docker build troubleshooting
+
+### `esbuild` / `ETXTBSY` during `npm install`
+
+On Docker Desktop for Mac, the esbuild postinstall script can fail with:
+
+```text
+Error: spawnSync .../node_modules/esbuild/bin/esbuild ETXTBSY
+```
+
+This is a known Docker Desktop + Linux kernel race when a native binary is written and executed in the same step. The Dockerfile avoids it by running `npm ci --ignore-scripts` and only attempting the esbuild native install as a best-effort step.
+
+If you still hit this on an older copy of the installer:
+
+1. Pull the latest `Dockerfile` (or apply the same `npm ci --ignore-scripts` change).
+2. Retry: `docker compose build --no-cache`.
+3. In Docker Desktop → Settings → General, try disabling **Use Rosetta for x86/amd64 emulation on Apple Silicon** if enabled, then rebuild.
+
 ## Failure handling (v1)
 
 On pipeline failure: fix the issue, return to wizard review, re-run **Create cluster**. No partial resume.

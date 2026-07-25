@@ -1,0 +1,10 @@
+data/
+.git/
+**/__pycache__/
+**/*.pyc
+**/.env
+**/.env.*
+**/node_modules/
+app/ui/dist/
+*.tfstate
+*.tfstate.*
