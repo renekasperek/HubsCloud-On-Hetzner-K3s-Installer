@@ -11,44 +11,77 @@ users:
     ssh_authorized_keys:
       - ${ssh_public_key}
 
-# Wait for user creation to complete before running commands
+write_files:
+  - path: /etc/netplan/51-hcce-private.yaml
+    content: |
+      network:
+        version: 2
+        ethernets:
+          enp7s0:
+            dhcp4: true
+            dhcp4-overrides:
+              route-metric: 100
+    permissions: "0644"
+  - path: /usr/local/sbin/hcce-stage
+    content: |
+      #!/bin/bash
+      stage="${1:-unknown}"
+      echo "$stage" > /var/run/hcce-bootstrap.stage
+      echo "$(date -Is) [stage] $stage" >> /var/log/cloud-init-custom.log
+    permissions: "0755"
+
 bootcmd:
   - sleep 5
+  - echo starting > /var/run/hcce-bootstrap.stage
 
 runcmd:
-  # Install K3s with private network interface (master node) using pre-shared token and cluster-init for multi-master
+  - /usr/local/sbin/hcce-stage netplan
+  - netplan apply || true
+  - |
+    set -euo pipefail
+    /usr/local/sbin/hcce-stage wait-private-network
+    for i in $(seq 1 60); do
+      ip link set enp7s0 up 2>/dev/null || true
+      if ip -4 -o addr show dev enp7s0 2>/dev/null | grep -q 'inet '; then
+        break
+      fi
+      netplan apply 2>/dev/null || true
+      sleep 5
+    done
+    if ! ip -4 -o addr show dev enp7s0 2>/dev/null | grep -q 'inet '; then
+      /usr/local/sbin/hcce-stage failed:enp7s0-no-ip
+      exit 1
+    fi
+
+  - /usr/local/sbin/hcce-stage k3s-install
   - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller --disable traefik --flannel-iface=enp7s0 --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 --node-name=$(hostname -f) --kube-controller-manager-arg=bind-address=0.0.0.0 --kube-proxy-arg=metrics-bind-address=0.0.0.0 --kube-scheduler-arg=bind-address=0.0.0.0 --tls-san=10.0.1.1 --tls-san=$(curl -s https://ipinfo.io/ip) --token=${k3s_token}" sh -
 
-  # Wait for K3s to fully start and create necessary files
+  - /usr/local/sbin/hcce-stage wait-k3s-config
   - sleep 15
-  - while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do echo "Waiting for K3s to start..."; sleep 5; done
+  - while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do sleep 5; done
+  - |
+    set -euo pipefail
+    /usr/local/sbin/hcce-stage wait-readyz
+    while ! curl -k -sf --connect-timeout 5 --max-time 10 https://10.0.1.1:6443/readyz >/dev/null 2>&1; do
+      sleep 5
+    done
 
-  # Ensure cluster user home directory exists with proper permissions
+  - /usr/local/sbin/hcce-stage setup-user
   - mkdir -p /home/cluster
   - chown cluster:cluster /home/cluster
   - chmod 755 /home/cluster
-
-  # Create and setup .kube directory
   - mkdir -p /home/cluster/.kube
   - if [ -f /etc/rancher/k3s/k3s.yaml ]; then cp /etc/rancher/k3s/k3s.yaml /home/cluster/.kube/config; fi
   - chown -R cluster:cluster /home/cluster/.kube
   - chmod 700 /home/cluster/.kube
   - if [ -f /home/cluster/.kube/config ]; then chmod 600 /home/cluster/.kube/config; fi
-
-  # Create and setup .ssh directory
   - mkdir -p /home/cluster/.ssh
   - if [ -f /root/.ssh/authorized_keys ]; then cp /root/.ssh/authorized_keys /home/cluster/.ssh/authorized_keys; fi
   - chown -R cluster:cluster /home/cluster/.ssh
   - chmod 700 /home/cluster/.ssh
   - if [ -f /home/cluster/.ssh/authorized_keys ]; then chmod 600 /home/cluster/.ssh/authorized_keys; fi
-
-  # Set ownership for K3s files if they exist
   - if [ -f /etc/rancher/k3s/k3s.yaml ]; then chown cluster:cluster /etc/rancher/k3s/k3s.yaml; fi
   - if [ -f /var/lib/rancher/k3s/server/node-token ]; then chown cluster:cluster /var/lib/rancher/k3s/server/node-token; fi
 
-  # Log completion
-  - echo "Cloud-init setup completed successfully" >> /var/log/cloud-init-custom.log
-  - echo "K3s status:" >> /var/log/cloud-init-custom.log
+  - /usr/local/sbin/hcce-stage done
   - systemctl status k3s >> /var/log/cloud-init-custom.log 2>&1
-  - echo "Directory structure:" >> /var/log/cloud-init-custom.log
-  - ls -la /home/cluster/ >> /var/log/cloud-init-custom.log 2>&1

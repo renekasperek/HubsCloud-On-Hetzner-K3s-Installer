@@ -73,6 +73,8 @@ type ClusterJoinServer = {
   k8s_ready: boolean;
   k8s_present: boolean;
   issue: string | null;
+  bootstrap_stage?: string | null;
+  bootstrap_log?: string | null;
 };
 
 type ClusterJoinStatus = {
@@ -117,9 +119,38 @@ function issueLabel(issue: string | null) {
   }
 }
 
+function bootstrapStageLabel(stage: string | null | undefined): string | null {
+  if (!stage) return null;
+  if (stage.startsWith("failed:")) {
+    return `Failed: ${stage.slice(7).replace(/-/g, " ")}`;
+  }
+  if (stage.startsWith("cloud-init:")) {
+    return stage.replace("cloud-init:", "Cloud-init: ");
+  }
+  const match = stage.match(/^k3s-join-(\d+)$/);
+  if (match) return `Joining cluster (attempt ${match[1]}/5)`;
+  const labels: Record<string, string> = {
+    starting: "Starting boot…",
+    netplan: "Configuring network…",
+    "wait-private-network": "Waiting for private network…",
+    "wait-master-grace": "Waiting for master to start…",
+    "wait-master-api": "Waiting for master API…",
+    "wait-master-readyz": "Waiting for master to be ready…",
+    "k3s-install": "Installing K3s…",
+    "wait-k3s-config": "Waiting for K3s config…",
+    "wait-readyz": "Waiting for API readiness…",
+    "wait-k3s-active": "Waiting for K3s service…",
+    "setup-user": "Finishing setup…",
+    done: "Bootstrap complete",
+  };
+  return labels[stage] || stage.replace(/-/g, " ");
+}
+
 function serverStatusLabel(server: ClusterJoinServer, stuckMinutes: number) {
   if (server.k8s_ready) return "Connected";
   if (server.k8s_present) return "Joining";
+  const bootstrap = bootstrapStageLabel(server.bootstrap_stage);
+  if (bootstrap) return bootstrap;
   // Workers often need 10+ minutes for cloud-init + k3s join — avoid alarming labels early on.
   if (stuckMinutes < 10 && server.issue && server.issue !== "ssh_unreachable" && server.issue !== "ssh_key_mismatch" && server.issue !== "hetzner_missing") {
     return "Setting up";
@@ -535,6 +566,12 @@ export function ProgressPage({ instanceId }: { instanceId: string }) {
                   <span className="muted" style={{ marginLeft: 8, fontSize: 13 }}>
                     {s.role}
                   </span>
+                  {!s.k8s_ready && s.bootstrap_stage && (
+                    <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                      {s.bootstrap_stage}
+                      {s.bootstrap_log ? ` — ${s.bootstrap_log.replace(/^\d{4}-\d{2}-\d{2}T[^ ]+ /, "").slice(0, 80)}` : ""}
+                    </div>
+                  )}
                 </div>
                 <span style={{ fontSize: 13 }}>{serverStatusLabel(s, stuckMinutes)}</span>
               </div>

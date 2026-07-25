@@ -60,9 +60,32 @@ def _repair_private_network(instance_id: str, key, public_ip: str) -> bool:
     return False
 
 
+def _wait_for_master_k3s(instance_id: str, key, public_ip: str) -> bool:
+    append_log(instance_id, f"Repair: waiting for master K3s API before join from {public_ip}")
+    script = (
+        "set -e; "
+        "MASTER=10.0.1.1; "
+        "for i in $(seq 1 90); do "
+        "if curl -k -sf --connect-timeout 5 --max-time 10 https://${MASTER}:6443/readyz >/dev/null 2>&1; then exit 0; fi; "
+        "sleep 10; "
+        "done; exit 1"
+    )
+    for user in ("cluster", "root"):
+        prefix = "sudo " if user == "cluster" else ""
+        code, _, err = ssh_run(key, public_ip, user, prefix + script, timeout=960)
+        if code == 0:
+            append_log(instance_id, "Repair: master K3s API is ready")
+            return True
+        append_log(instance_id, f"Repair wait for master via {user}@{public_ip}: {err[:200]}")
+    return False
+
+
 def _install_k3s(instance_id: str, key, public_ip: str, server_name: str, token: str) -> bool:
     template = K3S_INSTALL.get(server_name)
     if not template:
+        return False
+    if server_name != "hcce-master-db" and not _wait_for_master_k3s(instance_id, key, public_ip):
+        append_log(instance_id, f"Repair: master K3s not ready — skipping join on {server_name}")
         return False
     cmd = template.format(token=token)
     append_log(instance_id, f"Repair: installing k3s on {server_name} ({public_ip})")

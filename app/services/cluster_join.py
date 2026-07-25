@@ -10,7 +10,7 @@ from pipeline.core import kube_env
 from schemas.models import ClusterJoinServer, ClusterJoinStatus
 from services.providers.hetzner.api import fetch_cluster_servers, server_private_ip, server_public_ip
 from services.ssh import ssh_diagnose, ssh_probe, ssh_run
-from services.storage import load_spec, load_status
+from services.storage import append_log, load_spec, load_status
 
 EXPECTED_NODES: list[dict[str, str]] = [
     {"name": "hcce-master-db", "role": "master", "private_ip": "10.0.1.1"},
@@ -19,6 +19,8 @@ EXPECTED_NODES: list[dict[str, str]] = [
 ]
 MASTER_PRIVATE_IP = "10.0.1.1"
 CLUSTER_JOIN_REPAIR_AFTER_SECONDS = 600
+BOOTSTRAP_STAGE_FILE = "/var/run/hcce-bootstrap.stage"
+BOOTSTRAP_LOG_FILE = "/var/log/cloud-init-custom.log"
 
 
 def mark_cluster_wait_started(instance_id: str) -> None:
@@ -60,6 +62,62 @@ def _ssh_key(instance_id: str) -> Path | None:
 def ssh_reachable(key: Path, host: str) -> bool:
     ok, _ = ssh_diagnose(key, host)
     return ok
+
+
+def fetch_bootstrap_status(key: Path, public_ip: str) -> tuple[str | None, str | None]:
+    remote_cmd = (
+        f"stage=$(cat {BOOTSTRAP_STAGE_FILE} 2>/dev/null || true); "
+        'if [ -z "$stage" ]; then '
+        '  ci=$(cloud-init status 2>/dev/null | head -1 || true); '
+        '  [ -n "$ci" ] && stage="cloud-init:${ci%% *}"; '
+        "fi; "
+        f'last=$(grep "\\[stage\\]" {BOOTSTRAP_LOG_FILE} 2>/dev/null | tail -1 || '
+        f"       tail -1 {BOOTSTRAP_LOG_FILE} 2>/dev/null || true); "
+        'printf \'%s\\n%s\' "$stage" "$last"'
+    )
+    ok, out = ssh_probe(key, public_ip, remote_cmd)
+    if not ok:
+        return None, None
+    lines = [line.strip() for line in out.splitlines()]
+    stage = lines[0] if lines and lines[0] else None
+    last_log = lines[1] if len(lines) > 1 and lines[1] else None
+    return stage, last_log
+
+
+def log_bootstrap_stages(instance_id: str) -> None:
+    key = _ssh_key(instance_id)
+    if not key:
+        return
+
+    spec = load_spec(instance_id)
+    hetzner_servers: dict[str, dict] = {}
+    if spec.hetzner_api_token:
+        try:
+            hetzner_servers = fetch_cluster_servers(spec.hetzner_api_token)
+        except Exception as e:
+            append_log(instance_id, f"Bootstrap status: could not list Hetzner servers ({e})")
+            return
+
+    for expected in EXPECTED_NODES:
+        name = expected["name"]
+        hc = hetzner_servers.get(name, {})
+        public_ip = server_public_ip(hc) if hc else ""
+        if not public_ip:
+            append_log(instance_id, f"[{name}] bootstrap: no public IP yet")
+            continue
+
+        reachable, ssh_issue = ssh_diagnose(key, public_ip)
+        if not reachable:
+            append_log(instance_id, f"[{name}] bootstrap: SSH unreachable ({ssh_issue or 'unknown'})")
+            continue
+
+        stage, last_log = fetch_bootstrap_status(key, public_ip)
+        stage_text = stage or "unknown"
+        if last_log:
+            detail = last_log if len(last_log) <= 120 else last_log[:117] + "..."
+            append_log(instance_id, f"[{name}] bootstrap stage={stage_text} — {detail}")
+        else:
+            append_log(instance_id, f"[{name}] bootstrap stage={stage_text}")
 
 
 def classify_node_issue(
@@ -173,9 +231,12 @@ def get_cluster_join_status(instance_id: str) -> ClusterJoinStatus:
         k8s_present, k8s_ready = _match_k8s_node(name, k8s_nodes)
 
         issue: str | None = None
+        bootstrap_stage: str | None = None
+        bootstrap_log: str | None = None
         is_master = name == "hcce-master-db"
         if not k8s_present and key and public_ip:
             issue = classify_node_issue(key, public_ip, is_master=is_master)
+            bootstrap_stage, bootstrap_log = fetch_bootstrap_status(key, public_ip)
         elif not k8s_present and not hc:
             issue = "hetzner_missing"
         elif not k8s_present:
@@ -199,6 +260,8 @@ def get_cluster_join_status(instance_id: str) -> ClusterJoinStatus:
                 k8s_ready=k8s_ready,
                 k8s_present=k8s_present,
                 issue=issue,
+                bootstrap_stage=bootstrap_stage,
+                bootstrap_log=bootstrap_log,
             )
         )
 

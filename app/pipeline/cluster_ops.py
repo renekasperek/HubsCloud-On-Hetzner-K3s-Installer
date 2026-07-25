@@ -59,7 +59,7 @@ def wait_nodes_ready(instance_id: str, timeout: int = 1200) -> None:
     import json
 
     from pipeline.cluster_repair import repair_cluster_join
-    from services.cluster_join import diagnose
+    from services.cluster_join import diagnose, log_bootstrap_stages
     from services.storage import load_spec
 
     spec = load_spec(instance_id)
@@ -95,6 +95,7 @@ def wait_nodes_ready(instance_id: str, timeout: int = 1200) -> None:
 
         if time.time() - last_diagnose >= 60:
             last_diagnose = time.time()
+            log_bootstrap_stages(instance_id)
             join_status = diagnose(instance_id)
             if join_status.missing and join_status.stuck_seconds >= 600:
                 missing_list = ", ".join(join_status.missing)

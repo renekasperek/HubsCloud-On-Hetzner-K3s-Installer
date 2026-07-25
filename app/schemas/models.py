@@ -178,6 +178,8 @@ class ClusterJoinServer(BaseModel):
     k8s_ready: bool = False
     k8s_present: bool = False
     issue: str | None = None
+    bootstrap_stage: str | None = None
+    bootstrap_log: str | None = None
 
 
 class ClusterJoinStatus(BaseModel):

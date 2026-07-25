@@ -192,6 +192,7 @@ resource "hcloud_server" "webrtc_worker" {
   ]
 }
 
+# Web worker starts after webrtc worker so cloud-init joins are staggered (master must be ready first).
 resource "hcloud_server" "web_worker" {
   name               = "hcce-web-worker"
   image              = "ubuntu-24.04"
@@ -223,6 +224,7 @@ resource "hcloud_server" "web_worker" {
 
   depends_on = [
     hcloud_server.master_node,
+    hcloud_server.webrtc_worker,
     hcloud_network_subnet.private_network_subnet,
     hcloud_firewall.open_firewall,
     hcloud_placement_group.my_group,
