@@ -22,19 +22,24 @@ NETPLAN_CONTENT = """network:
         route-metric: 100
 """
 
+# Pinned k3s version. MUST stay in sync with the three cloud-init templates in
+# templates/terraform/ — a repaired node that installs a different version than the
+# master introduces version skew inside the etcd cluster. See docs/NEXT-STEPS.md item 1.
+K3S_VERSION = "v1.36.2+k3s1"
+
 K3S_INSTALL: dict[str, str] = {
     "hcce-master-db": (
-        'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller '
+        'curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=' + K3S_VERSION + ' INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller '
         '--kubelet-arg=cloud-provider=external --disable traefik --flannel-iface=enp7s0 --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 '
         '--tls-san=10.0.1.1 --token={token}" sh -'
     ),
     "hcce-webrtc-worker": (
-        'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 '
+        'curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=' + K3S_VERSION + ' INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 '
         '--token={token} --flannel-iface=enp7s0 --node-ip=10.0.1.2 --disable-cloud-controller '
         '--kubelet-arg=cloud-provider=external --disable traefik" sh -'
     ),
     "hcce-web-worker": (
-        'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 '
+        'curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=' + K3S_VERSION + ' INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 '
         '--token={token} --flannel-iface=enp7s0 --node-ip=10.0.1.3 --disable-cloud-controller '
         '--kubelet-arg=cloud-provider=external --disable traefik" sh -'
     ),

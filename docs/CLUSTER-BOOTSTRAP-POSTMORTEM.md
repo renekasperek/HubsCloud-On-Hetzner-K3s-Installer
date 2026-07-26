@@ -207,11 +207,32 @@ The pinned manifest runs with:
 --allocate-node-cidrs=true --cluster-cidr=10.244.0.0/16
 ```
 
-The cluster uses `--cluster-cidr=10.42.0.0/16`, and k3s already allocates node pod CIDRs.
-So the CIDR is wrong *and* two controllers are assigning `node.spec.podCIDR`. This did not
-block LB targets — the service controller is independent of the route controller — but it
-should be resolved: either switch to plain `ccm.yaml` (correct for a flannel overlay, no
-route controller) or patch the CIDR. **Not yet investigated.**
+The cluster uses `10.42.0.0/16`. `ccm-networks.yaml` is simply the upstream Helm chart
+rendered with default values, and the chart documents the requirement plainly:
+`networking.clusterCIDR` (default `10.244.0.0/16`) *"must match the PodCIDR subnet your
+cluster has been configured with"*. Ours does not.
+
+**Impact is low, and the cluster is not broken by it.** The CCM route controller programs
+routes in the Hetzner network from each node's `spec.podCIDR`. With flannel in VXLAN mode pod
+traffic is encapsulated and does not depend on those routes, so pod networking works either
+way. The residual effects are that the controller's stale-route reconciliation keys off a
+CIDR that matches nothing of ours, and that the configuration would be wrong if native
+routing were ever enabled.
+
+**Correction to an earlier note:** this document previously claimed the CCM and k3s both
+assign `node.spec.podCIDR`. That was wrong. `--allocate-node-cidrs` on a *cloud* controller
+manager only gates the route controller; CIDR allocation is done by kube-controller-manager
+(k3s). There is no competing allocator.
+
+**Fix.** Set the cluster CIDR to `10.42.0.0/16` — either install the CCM via its Helm chart
+with `networking.clusterCIDR` (consistent with how the CSI driver is already installed) or
+patch the flag in the applied manifest. This is what
+[kube-hetzner](https://github.com/kube-hetzner/terraform-hcloud-kube-hetzner) does: it wires
+`networking.clusterCIDR` from its own `cluster_ipv4_cidr` variable.
+
+Keep the **networks** variant rather than switching to plain `ccm.yaml` — Load Balancer
+private-IP attachment depends on the CCM knowing the network, and that is the mechanism
+fixed in Part 2.
 
 ---
 
@@ -271,6 +292,34 @@ pointing at the old one and silently lose their rules.
 servers in `main.tf`. This is *not* needed for hardening any more; it protects the paths that
 still do a full apply — notably Retry provisioning, where the drift would otherwise replace a
 healthy master while recreating the workers.
+
+### Upgrading the provider does not fix this
+
+Checked on 2026-07-26, because the obvious question is whether a newer provider persists
+`location` correctly. It does not. Comparing the resource schema of 1.50.0 and 1.67.0:
+
+```
+v150 hcloud_server.location: optional=True computed=True
+v167 hcloud_server.location: optional=True computed=True
+```
+
+`location` is Optional+Computed in both — the provider is *supposed* to read it back from the
+API — yet state holds `""`. Nothing in the 1.51 → 1.67 changelog addresses it.
+
+The drift is also not caused by anything we do. Instances that never ran firewall hardening,
+whose `terraform.tfvars` set a location at create time, still show an empty value:
+
+```
+9d1f6c80 | hardening_runs=0 | tfvars location="fsn1" | state location=''
+642dddaf | hardening_runs=0 | tfvars location="nbg1" | state location=''
+```
+
+So the provider writes it empty at create and refresh never repairs it. The `ignore_changes`
+workaround is therefore load-bearing at every provider version currently available, and must
+not be removed on the assumption that an upgrade fixed it. Related long-standing reports,
+both closed without resolution: hetznercloud/terraform-provider-hcloud
+[#278](https://github.com/hetznercloud/terraform-provider-hcloud/issues/278),
+[#471](https://github.com/hetznercloud/terraform-provider-hcloud/issues/471).
 
 ## Design Rules
 

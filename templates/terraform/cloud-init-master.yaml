@@ -68,7 +68,7 @@ runcmd:
   # comes up with 0 targets and has to be attached by hand in the console.
   # Side effect: nodes register with the taint node.cloudprovider.kubernetes.io/uninitialized
   # until the CCM clears it. install_ccm_csi() gates on that; see wait_nodes_initialized().
-  - PRIV=$(cat /var/run/hcce-private-iface); curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller --kubelet-arg=cloud-provider=external --disable traefik --flannel-iface=$PRIV --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 --node-name=$(hostname -f) --kube-controller-manager-arg=bind-address=0.0.0.0 --kube-proxy-arg=metrics-bind-address=0.0.0.0 --kube-scheduler-arg=bind-address=0.0.0.0 --tls-san=10.0.1.1 --tls-san=$(curl -s https://ipinfo.io/ip) --token=${k3s_token}" sh -
+  - PRIV=$(cat /var/run/hcce-private-iface); curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.36.2+k3s1 INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller --kubelet-arg=cloud-provider=external --disable traefik --flannel-iface=$PRIV --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 --node-name=$(hostname -f) --kube-controller-manager-arg=bind-address=0.0.0.0 --kube-proxy-arg=metrics-bind-address=0.0.0.0 --kube-scheduler-arg=bind-address=0.0.0.0 --tls-san=10.0.1.1 --tls-san=$(curl -s https://ipinfo.io/ip) --token=${k3s_token}" sh -
 
   - /usr/local/sbin/hcce-stage wait-k3s-config
   - sleep 15

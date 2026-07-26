@@ -28,13 +28,36 @@
   `hcloud://` providerID, and fails with an actionable message instead of letting later steps
   hang on unschedulable pods (nodes now carry the `uninitialized` taint until the CCM clears it)
 
+### Changed
+
+- **k3s is now pinned to `v1.36.2+k3s1`** instead of installing whatever `get.k3s.io` serves at
+  provisioning time. Applied to all six install sites — the three cloud-init templates and the
+  three `K3S_INSTALL` commands in `app/pipeline/cluster_repair.py` (via a `K3S_VERSION`
+  constant). This makes provisioning reproducible and, more importantly, removes a version-skew
+  hazard: the repair path reinstalls k3s, so an unpinned repaired node could join an older
+  master running a newer k3s inside the same etcd cluster. `v1.36.2+k3s1` is the build verified
+  healthy end to end on 2026-07-26.
+- hcloud Terraform provider **1.50.0 → 1.67.0** (16 minor versions; latest as of 2026-07-24).
+  Includes the 1.61.0 fix *"apply_to update removes firewall from state when target resource is
+  not found"*, which is in the firewall path. Pinned exactly rather than with `~>`, because
+  `.terraform.lock.hcl` is not copied into per-instance terraform dirs — a range would let
+  different clusters build with different, untested provider versions.
+  Verified: all six resource types we use are present, and every `hcloud_server` attribute we
+  set still exists. `datacenter` is deprecated but **not** yet removed, and we never used it.
+  Note: the upgrade does **not** fix the `location` state drift — `ignore_changes = [location]`
+  remains load-bearing. Not yet exercised against a live cluster.
+
 ### Known Issues
 
-- The pinned `ccm-networks.yaml` v1.23.0 runs with `--allocate-node-cidrs=true
-  --cluster-cidr=10.244.0.0/16`, but the cluster uses `10.42.0.0/16` and k3s already allocates
-  node pod CIDRs. Does not affect Load Balancer targets. Not yet investigated.
+- The pinned `ccm-networks.yaml` v1.23.0 is the upstream Helm chart rendered with default
+  values, so it carries `--cluster-cidr=10.244.0.0/16` while the cluster uses `10.42.0.0/16`.
+  Cosmetic in the current setup — flannel VXLAN does not rely on the routes the CCM programs,
+  and the CCM does not allocate pod CIDRs. Should be set to `10.42.0.0/16` when convenient.
 - An instance is frozen at the spec it was rendered with, so template fixes only reach new
   instances. No migration path short of destroy + re-provision.
+- Deferred hardening work is tracked in [NEXT-STEPS.md](NEXT-STEPS.md) — k3s version pinning,
+  etcd snapshots, restricting the kube-API/SSH firewall source ranges, and an OS patching
+  policy. To be addressed at the next version bump.
 
 ## [Unreleased] — 2026-07-25
 

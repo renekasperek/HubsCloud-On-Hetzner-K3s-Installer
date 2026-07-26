@@ -99,7 +99,7 @@ runcmd:
     PRIV=$(cat /var/run/hcce-private-iface)
     for attempt in 1 2 3; do
       /usr/local/sbin/hcce-stage "k3s-install-$${attempt}"
-      if curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 --token=${k3s_token} --kubelet-arg=cloud-provider=external --flannel-iface=$PRIV --node-ip=10.0.1.3 --disable-cloud-controller --disable traefik" sh -; then
+      if curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.36.2+k3s1 INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 --token=${k3s_token} --kubelet-arg=cloud-provider=external --flannel-iface=$PRIV --node-ip=10.0.1.3 --disable-cloud-controller --disable traefik" sh -; then
         sleep 10
         if systemctl is-active --quiet k3s; then break; fi
       fi

@@ -1,8 +1,12 @@
 terraform {
   required_providers {
     hcloud = {
+      # Pinned exactly, not "~>": .terraform.lock.hcl is not copied into the
+      # per-instance terraform dir, so each instance resolves this constraint on
+      # its own `terraform init`. A range would let different clusters be built
+      # with different, untested provider versions.
       source  = "hetznercloud/hcloud"
-      version = "1.50.0"
+      version = "1.67.0"
     }
   }
 }
