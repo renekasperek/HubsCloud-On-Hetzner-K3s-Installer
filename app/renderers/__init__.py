@@ -10,7 +10,7 @@ from config import TEMPLATES_DIR, instance_dir
 from schemas.models import InstanceSpec
 from services.hetzner import estimate_cluster_monthly_cost
 from services.core_images import resolve_all_core_app_images
-from services.secrets import generate_rsa_material
+from services.secrets import generate_rsa_material, generate_self_signed_cert
 
 
 def _jinja_env() -> Environment:
@@ -21,11 +21,33 @@ def _jinja_env() -> Environment:
     )
 
 
+def _ensure_instance_secrets(spec: InstanceSpec, secrets: dict[str, str]) -> dict[str, str]:
+    """Fill in any missing per-instance key material and persist it.
+
+    Anything generated here MUST be written back to secrets.json. Every render
+    calls this, so material that is generated but not persisted would differ
+    between hcce.yaml and the k8s manifests of a single run, and again on the
+    next re-render — silently breaking a deployment whose components no longer
+    agree on the same key.
+    """
+    from services.storage import save_secrets
+
+    filled = dict(secrets)
+    if "perms_key" not in filled or "pgrst_jwt_secret" not in filled:
+        filled["perms_key"], filled["pgrst_jwt_secret"] = generate_rsa_material()
+    # Bootstrap TLS material is tied to the hub domain, so regenerate it if the
+    # domain changed as well as when it is missing entirely.
+    if spec.hub_domain and not filled.get("init_cert"):
+        filled["init_cert"], filled["init_key"] = generate_self_signed_cert(spec.hub_domain)
+
+    if filled != secrets:
+        save_secrets(spec.id, filled)
+    return filled
+
+
 def _base_context(spec: InstanceSpec, secrets: dict[str, str]) -> dict:
     types = spec.resolved_server_types()
-    if "perms_key" not in secrets or "pgrst_jwt_secret" not in secrets:
-        perms_key, pgrst_jwt_secret = generate_rsa_material()
-        secrets = {**secrets, "perms_key": perms_key, "pgrst_jwt_secret": pgrst_jwt_secret}
+    secrets = _ensure_instance_secrets(spec, secrets)
     inst = instance_dir(spec.id)
     resolved_images = resolve_all_core_app_images(spec.core_app_images)
     return {
@@ -51,6 +73,8 @@ def _base_context(spec: InstanceSpec, secrets: dict[str, str]) -> dict:
         "admin_password": secrets["admin_password"],
         "perms_key": secrets["perms_key"],
         "pgrst_jwt_secret": secrets["pgrst_jwt_secret"],
+        "init_cert": secrets.get("init_cert", ""),
+        "init_key": secrets.get("init_key", ""),
         "reticulum_image": resolved_images["reticulum"],
         "hubs_image": resolved_images["hubs"],
         "spoke_image": resolved_images["spoke"],

@@ -35,11 +35,18 @@ write_files:
       host="$1"
       max="$${2:-120}"
       for i in $(seq 1 "$max"); do
-        code=$(curl -k -s -o /dev/null -w '%%{http_code}' --connect-timeout 5 --max-time 10 "https://$host:6443/cacerts" 2>/dev/null || echo 000)
+        # curl -w ALWAYS writes a status code (000 when it cannot connect) and
+        # ALSO exits non-zero on failure. Never append "|| echo 000" here: that
+        # produces "000\n000", which stops matching the 000 case and makes the
+        # loop fall through to "proceed" against a master that is not up.
+        code=$(curl -k -s -o /dev/null -w '%%{http_code}' --connect-timeout 5 --max-time 10 "https://$host:6443/cacerts" 2>/dev/null)
+        [ -z "$code" ] && code=000
+        # Only these mean "the supervisor is answering". Anything else — 000,
+        # 5xx, or something unexpected — must WAIT. An unknown value is never
+        # treated as success.
         case "$code" in
-          200) echo "$host serving bootstrap data (HTTP 200)"; exit 0 ;;
-          000|500|503) ;;
-          *) echo "$host API answering (HTTP $code) — proceeding"; exit 0 ;;
+          200)     echo "$host serving bootstrap data (HTTP 200)"; exit 0 ;;
+          401|403) echo "$host API answering (HTTP $code) — proceeding"; exit 0 ;;
         esac
         echo "Waiting for $host supervisor (HTTP $code)..."
         sleep 10
@@ -87,7 +94,9 @@ runcmd:
 
   - /usr/local/sbin/hcce-stage wait-master-api
   - sleep 30
-  - /usr/local/sbin/hcce-wait-api 10.0.1.1 120
+  # Fatal on timeout: joining a master that is not serving just burns the
+  # retry budget and ends in failed:k3s-join with a misleading cause.
+  - /usr/local/sbin/hcce-wait-api 10.0.1.1 120 || { /usr/local/sbin/hcce-stage failed:master-unreachable; exit 1; }
 
   # Retry the join: if we still lost the race with master's etcd, a clean
   # uninstall + retry recovers instead of leaving a half-joined node.
@@ -95,6 +104,9 @@ runcmd:
     PRIV=$(cat /var/run/hcce-private-iface)
     for attempt in 1 2 3; do
       /usr/local/sbin/hcce-stage "k3s-install-$${attempt}"
+      # Re-confirm the master before each attempt — it may have restarted, and a
+      # retry against a down master wastes the budget. Returns immediately when up.
+      /usr/local/sbin/hcce-wait-api 10.0.1.1 120 || { /usr/local/sbin/hcce-stage failed:master-unreachable; exit 1; }
       if curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.36.2+k3s1 INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 --token=${k3s_token} --kubelet-arg=cloud-provider=external --flannel-iface=$PRIV --node-ip=10.0.1.2 --disable-cloud-controller --disable traefik" sh -; then
         sleep 10
         if systemctl is-active --quiet k3s; then break; fi

@@ -32,7 +32,7 @@ def run_pipeline(instance_id: str) -> None:
         write_ssh_files(spec)
 
         update_status(instance_id, "render", 2, "running", "Generating secrets and rendering templates")
-        secrets = load_secrets(instance_id) or generate_secrets()
+        secrets = load_secrets(instance_id) or generate_secrets(spec.hub_domain)
         save_secrets(instance_id, secrets)
         render_all(spec, secrets)
 

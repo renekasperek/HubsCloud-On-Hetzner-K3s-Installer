@@ -11,9 +11,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from schemas.models import InstanceSpec
 
 
-def generate_secrets() -> dict[str, str]:
+def generate_secrets(hub_domain: str = "") -> dict[str, str]:
     perms_key, pgrst_jwt_secret = generate_rsa_material()
-    return {
+    out = {
         "k3s_token": secrets.token_hex(32),
         "db_password": secrets.token_urlsafe(24),
         "node_cookie": secrets.token_hex(16),
@@ -23,6 +23,59 @@ def generate_secrets() -> dict[str, str]:
         "perms_key": perms_key,
         "pgrst_jwt_secret": pgrst_jwt_secret,
     }
+    if hub_domain:
+        init_cert, init_key = generate_self_signed_cert(hub_domain)
+        out["init_cert"] = init_cert
+        out["init_key"] = init_key
+    return out
+
+
+def generate_self_signed_cert(hub_domain: str) -> tuple[str, str]:
+    """Return (init_cert, init_key): base64 PEM for the bootstrap TLS Secret.
+
+    Mirrors generateCertificate() in hubs-cloud community-edition
+    generate_script/index.js, which upstream substitutes as $initCert/$initKey:
+    a dedicated RSA-2048 keypair (deliberately NOT the PERMS_KEY pair), a
+    self-signed certificate with CN set to the hub domain, valid one year.
+
+    This must be generated per instance. A previous version of hcce.yaml.j2
+    carried the literal output of one upstream run, so every cluster shipped the
+    same private key under a CN that never matched its own domain.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hub_domain)])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hub_domain)]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    # node-forge's privateKeyToPem emits PKCS#1 ("RSA PRIVATE KEY"); match it.
+    key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    import base64
+
+    return (
+        base64.b64encode(cert_pem).decode(),
+        base64.b64encode(key_pem).decode(),
+    )
 
 
 def generate_rsa_material() -> tuple[str, str]:

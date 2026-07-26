@@ -263,7 +263,7 @@ def generate_ssh(instance_id: str):
 @router.post("/instances/{instance_id}/dry-run")
 def dry_run(instance_id: str):
     spec = load_spec(instance_id)
-    secrets = generate_secrets()
+    secrets = generate_secrets(spec.hub_domain)
     save_secrets(instance_id, secrets)
     inst = instance_dir(instance_id)
     ssh_dir = inst / "ssh"
