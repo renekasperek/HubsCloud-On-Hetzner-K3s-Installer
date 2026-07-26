@@ -22,17 +22,21 @@ stringData:
   DB_NAME: "retdb"
   DB_HOST: "pgbouncer"
   DB_HOST_T: "pgbouncer-t"
-  SMTP_SERVER: "{{ smtp_host }}"
+  # sed_replacement: these values are substituted into config.toml by the
+  # Reticulum image using sed, where "&" and "\\" have special meaning.
+  # NOT applied to DB_PASS (also used verbatim in PSQL/PGRST_DB_URI) or
+  # PERMS_KEY (legitimately contains backslashes).
+  SMTP_SERVER: {{ smtp_host | sed_replacement | tojson }}
   SMTP_PORT: "{{ smtp_port }}"
-  SMTP_USER: "{{ smtp_user }}"
-  SMTP_PASS: "{{ smtp_password }}"
-  SMTP_FROM: "{{ smtp_from }}"
-  ADM_EMAIL: "{{ admin_email }}"
+  SMTP_USER: {{ smtp_user | sed_replacement | tojson }}
+  SMTP_PASS: {{ smtp_password | sed_replacement | tojson }}
+  SMTP_FROM: {{ smtp_from | sed_replacement | tojson }}
+  ADM_EMAIL: {{ admin_email | sed_replacement | tojson }}
   PGRST_DB_URI: "postgres://postgres:{{ db_password }}@pgbouncer/retdb"
   GUARDIAN_KEY: "{{ guardian_key }}"
   PHX_KEY: "{{ phx_key }}"
-  SKETCHFAB_API_KEY: "{{ sketchfab_api_key }}"
-  TENOR_API_KEY: "{{ tenor_api_key }}"
+  SKETCHFAB_API_KEY: {{ sketchfab_api_key | sed_replacement | tojson }}
+  TENOR_API_KEY: {{ tenor_api_key | sed_replacement | tojson }}
   PSQL: "postgres://postgres:{{ db_password }}@pgbouncer/retdb"
   PERMS_KEY: '{{ perms_key }}'
   PGRST_JWT_SECRET: '{{ pgrst_jwt_secret }}'
@@ -434,7 +438,12 @@ data:
     from = "<SMTP_FROM>"
 
     [ret."Elixir.Ret.Mailer"]
-    server = "<SMTP_SERVER>"
+    # Swoosh.Adapters.SMTP (this Reticulum image) requires :relay.
+    # Upstream hubs-cloud still says `server`, which is Bamboo's key — that is
+    # correct for older Reticulum builds but raises here:
+    #   (ArgumentError) expected [:relay] to be set
+    # Do not "restore" this to `server` to match upstream.
+    relay = "<SMTP_SERVER>"
     port = "<SMTP_PORT>"
     username = "<SMTP_USER>"
     password = "<SMTP_PASS>"

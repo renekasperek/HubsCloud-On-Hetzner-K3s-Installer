@@ -13,12 +13,39 @@ from services.core_images import resolve_all_core_app_images
 from services.secrets import generate_rsa_material, generate_self_signed_cert
 
 
+def sed_replacement(value: str) -> str:
+    """Escape a value that the Reticulum image will sed into config.toml.
+
+    The image ships config.toml.template with <PLACEHOLDER> tokens and replaces
+    them from the turkeyCfg_* env vars using sed. Observed failure: an SMTP
+    password "t&5M*..." reached Swoosh as "t<SMTP_PASS>5M*..." — in a sed
+    replacement "&" means "the whole match" — and authentication failed with no
+    useful error. Users cannot be asked to avoid characters in a password their
+    provider issued, so this is handled here.
+
+    Escaping only "&" and "\\" is not enough: the s/// delimiter is also special,
+    and we cannot see the image's entrypoint to know whether it is "/", "|", "#"
+    or something else. So backslash-escape EVERY non-alphanumeric character. In a
+    sed replacement, "\\X" yields a literal X for any X without special meaning,
+    which makes this correct whatever the delimiter turns out to be. Alphanumerics
+    are deliberately left alone — "\\n", "\\t" and "\\1".."\\9" would otherwise
+    become newlines, tabs and backreferences.
+
+    Apply ONLY to values consumed through turkeyCfg_* substitution — never to
+    PERMS_KEY (legitimately contains backslashes) or DB_PASS (also used verbatim
+    in the PSQL/PGRST_DB_URI connection strings).
+    """
+    return "".join(c if c.isalnum() else "\\" + c for c in (value or ""))
+
+
 def _jinja_env() -> Environment:
-    return Environment(
+    env = Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
         undefined=StrictUndefined,
         keep_trailing_newline=True,
     )
+    env.filters["sed_replacement"] = sed_replacement
+    return env
 
 
 def _ensure_instance_secrets(spec: InstanceSpec, secrets: dict[str, str]) -> dict[str, str]:

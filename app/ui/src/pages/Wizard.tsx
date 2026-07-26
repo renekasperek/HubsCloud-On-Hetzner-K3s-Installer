@@ -769,6 +769,14 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                       <div className="image-option-body">
                         <div className="image-option-title">Pin a version tag</div>
                         <div className="image-option-desc">Same repository, specific tag on Hubs Foundation.</div>
+                        {cfg.mode === "pin" && app === "reticulum" && (
+                          <div className="image-option-desc" style={{ marginTop: 8, color: "#b45309" }}>
+                            Use <strong>stable-latest</strong> or build <strong>852</strong> or higher
+                            (e.g. <code>855</code>, <code>stable-855</code>). Reticulum switched email
+                            from Bamboo to Swoosh on 2026-02-27 — builds up to 851 expect a different
+                            config key and cannot send login emails.
+                          </div>
+                        )}
                         {cfg.mode === "pin" && (
                           <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
                             <input
@@ -792,6 +800,13 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                       <div className="image-option-body">
                         <div className="image-option-title">Custom public image</div>
                         <div className="image-option-desc">Full image reference, e.g. ghcr.io/org/hubs:1.0</div>
+                        {cfg.mode === "custom" && app === "reticulum" && (
+                          <div className="image-option-desc" style={{ marginTop: 8, color: "#b45309" }}>
+                            Must be Reticulum build <strong>852</strong> or higher (Swoosh email,
+                            since 2026-02-27). Builds up to 851 cannot send login emails with this
+                            configuration.
+                          </div>
+                        )}
                         {cfg.mode === "custom" && (
                           <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
                             <input
