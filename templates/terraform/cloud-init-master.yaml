@@ -12,59 +12,67 @@ users:
       - ${ssh_public_key}
 
 write_files:
-  - path: /etc/netplan/51-hcce-private.yaml
-    content: |
-      network:
-        version: 2
-        ethernets:
-          enp7s0:
-            dhcp4: true
-            dhcp4-overrides:
-              route-metric: 100
-    permissions: "0644"
   - path: /usr/local/sbin/hcce-stage
     content: |
       #!/bin/bash
-      stage="${1:-unknown}"
+      stage="$${1:-unknown}"
+      mkdir -p /var/run 2>/dev/null || true
       echo "$stage" > /var/run/hcce-bootstrap.stage
       echo "$(date -Is) [stage] $stage" >> /var/log/cloud-init-custom.log
+    permissions: "0755"
+  - path: /usr/local/sbin/hcce-detect-private-iface
+    content: |
+      #!/bin/bash
+      # Find the non-primary ethernet interface (private NIC). Names vary
+      # across Hetzner images: enp7s0, ens10, eth1, ...
+      set +e
+      for i in $(seq 1 30); do
+        PRIMARY="$(ip -4 route show default 2>/dev/null | awk '/default/{print $5; exit}')"
+        for iface in $(ls /sys/class/net/ 2>/dev/null); do
+          case "$iface" in
+            lo|docker*|veth*|cni*|flannel*|kube*|br-*|virbr*|tun*|tap*) continue ;;
+          esac
+          [ -e "/sys/class/net/$iface/device" ] || continue
+          [ "$iface" = "$PRIMARY" ] && continue
+          echo "$iface"
+          exit 0
+        done
+        sleep 2
+      done
+      exit 1
     permissions: "0755"
 
 bootcmd:
   - sleep 5
+  - mkdir -p /var/run
   - echo starting > /var/run/hcce-bootstrap.stage
 
 runcmd:
-  - /usr/local/sbin/hcce-stage netplan
-  - netplan apply || true
-  - |
-    set -euo pipefail
-    /usr/local/sbin/hcce-stage wait-private-network
-    for i in $(seq 1 60); do
-      ip link set enp7s0 up 2>/dev/null || true
-      if ip -4 -o addr show dev enp7s0 2>/dev/null | grep -q 'inet '; then
-        break
-      fi
-      netplan apply 2>/dev/null || true
-      sleep 5
-    done
-    if ! ip -4 -o addr show dev enp7s0 2>/dev/null | grep -q 'inet '; then
-      /usr/local/sbin/hcce-stage failed:enp7s0-no-ip
-      exit 1
-    fi
+  - /usr/local/sbin/hcce-stage detect-private-iface
+  - PRIV=$(/usr/local/sbin/hcce-detect-private-iface); echo "$PRIV" > /var/run/hcce-private-iface
+
+  # Ubuntu 24.04: AppArmor's userns restriction breaks containerd sandbox creation.
+  - /usr/local/sbin/hcce-stage kernel-prep
+  - sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+  # NOTE: do NOT add a "scope link" route for 10.0.0.0/16 here. Hetzner Cloud
+  # networks route peer traffic via the gateway 10.0.0.1 and never answer ARP
+  # for peer IPs. DHCP already installs the correct "via 10.0.0.1" route; a
+  # scope-link route has metric 0, wins over it, and blackholes the private
+  # network ("no route to host" on 10.0.1.x).
 
   - /usr/local/sbin/hcce-stage k3s-install
-  - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller --disable traefik --flannel-iface=enp7s0 --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 --node-name=$(hostname -f) --kube-controller-manager-arg=bind-address=0.0.0.0 --kube-proxy-arg=metrics-bind-address=0.0.0.0 --kube-scheduler-arg=bind-address=0.0.0.0 --tls-san=10.0.1.1 --tls-san=$(curl -s https://ipinfo.io/ip) --token=${k3s_token}" sh -
+  # --kubelet-arg=cloud-provider=external is REQUIRED by hcloud-cloud-controller-manager.
+  # Without it the CCM never sets spec.providerID (hcloud://<server-id>) on the node, so it
+  # can create the Load Balancer but cannot map Kubernetes nodes to Hetzner servers — the LB
+  # comes up with 0 targets and has to be attached by hand in the console.
+  # Side effect: nodes register with the taint node.cloudprovider.kubernetes.io/uninitialized
+  # until the CCM clears it. install_ccm_csi() gates on that; see wait_nodes_initialized().
+  - PRIV=$(cat /var/run/hcce-private-iface); curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller --kubelet-arg=cloud-provider=external --disable traefik --flannel-iface=$PRIV --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 --node-name=$(hostname -f) --kube-controller-manager-arg=bind-address=0.0.0.0 --kube-proxy-arg=metrics-bind-address=0.0.0.0 --kube-scheduler-arg=bind-address=0.0.0.0 --tls-san=10.0.1.1 --tls-san=$(curl -s https://ipinfo.io/ip) --token=${k3s_token}" sh -
 
   - /usr/local/sbin/hcce-stage wait-k3s-config
   - sleep 15
-  - while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do sleep 5; done
-  - |
-    set -euo pipefail
-    /usr/local/sbin/hcce-stage wait-readyz
-    while ! curl -k -sf --connect-timeout 5 --max-time 10 https://10.0.1.1:6443/readyz >/dev/null 2>&1; do
-      sleep 5
-    done
+  - while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do echo "Waiting for K3s to start..."; sleep 5; done
 
   - /usr/local/sbin/hcce-stage setup-user
   - mkdir -p /home/cluster

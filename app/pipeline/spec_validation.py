@@ -52,6 +52,8 @@ def validate_spec(spec: InstanceSpec) -> None:
         raise PipelineError("hub_domain required")
     if not spec.admin_email:
         raise PipelineError("admin_email required")
+    if not spec.location:
+        raise PipelineError("Choose a Hetzner location in the wizard")
     if not spec.ssh_public_key or not spec.ssh_key_generated:
         raise PipelineError("Generate an SSH key pair in the wizard before provisioning")
     if not all([spec.smtp_host, spec.smtp_user, spec.smtp_password, spec.smtp_from]):

@@ -22,18 +22,23 @@ from pipeline.runner import (
     validate_hetzner_token,
 )
 from pipeline.cluster_repair import repair_cluster_join
-from schemas.models import HealthSummary
+from schemas.models import (
+    CLUSTER_SIZE_RECOMMENDATIONS,
+    ClusterJoinStatus,
+    HealthSummary,
+    HetznerAudit,
+    InstanceSpec,
+    InstanceStatus,
+)
 from services.cluster_join import get_cluster_join_status
 from services.hetzner import audit_hetzner_cluster
 from services.hetzner import (
     fetch_locations,
     fetch_server_types_for_location,
     is_private_ip,
-    suggest_presets,
     validate_server_types,
 )
 from renderers import render_all
-from schemas.models import InstanceSpec, InstanceStatus, ClusterJoinStatus, HetznerAudit
 from services.secrets import generate_secrets, write_ssh_keypair
 from services.storage import (
     append_log,
@@ -157,26 +162,29 @@ def hetzner_server_types(instance_id: str, location: str):
     spec = load_spec(instance_id)
     if not spec.hetzner_api_token:
         raise HTTPException(400, "Hetzner API token required")
+    if not (location or "").strip():
+        raise HTTPException(400, "location query parameter required")
     try:
-        types = fetch_server_types_for_location(spec.hetzner_api_token, location)
+        types = fetch_server_types_for_location(spec.hetzner_api_token, location.strip())
         return {
-            "location": location,
+            "location": location.strip(),
             "server_types": [t.to_dict() for t in types if t.available and not t.deprecated],
         }
     except Exception as e:
         raise HTTPException(502, str(e)) from e
 
 
+@router.get("/instances/{instance_id}/hetzner/cluster-size-recommendations")
+def hetzner_cluster_size_recommendations(instance_id: str):
+    load_spec(instance_id)  # ensure instance exists
+    return {"recommendations": CLUSTER_SIZE_RECOMMENDATIONS}
+
+
 @router.get("/instances/{instance_id}/hetzner/presets")
-def hetzner_presets(instance_id: str, location: str):
-    spec = load_spec(instance_id)
-    if not spec.hetzner_api_token:
-        raise HTTPException(400, "Hetzner API token required")
-    try:
-        presets = suggest_presets(spec.hetzner_api_token, location)
-        return {"location": location, "presets": presets}
-    except Exception as e:
-        raise HTTPException(502, str(e)) from e
+def hetzner_presets_deprecated(instance_id: str, location: str):
+    """Deprecated — kept so older UI builds do not 404."""
+    load_spec(instance_id)
+    return {"location": location, "presets": {}, "recommendations": CLUSTER_SIZE_RECOMMENDATIONS}
 
 
 @router.get("/instances/{instance_id}/hetzner/load-balancer")

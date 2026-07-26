@@ -12,81 +12,105 @@ users:
       - ${ssh_public_key}
 
 write_files:
-  - path: /etc/netplan/51-hcce-private.yaml
-    content: |
-      network:
-        version: 2
-        ethernets:
-          enp7s0:
-            dhcp4: true
-            dhcp4-overrides:
-              route-metric: 100
-    permissions: "0644"
   - path: /usr/local/sbin/hcce-stage
     content: |
       #!/bin/bash
-      stage="${1:-unknown}"
+      stage="$${1:-unknown}"
+      mkdir -p /var/run 2>/dev/null || true
       echo "$stage" > /var/run/hcce-bootstrap.stage
       echo "$(date -Is) [stage] $stage" >> /var/log/cloud-init-custom.log
+    permissions: "0755"
+  - path: /usr/local/sbin/hcce-wait-api
+    content: |
+      #!/bin/bash
+      # Wait until the k3s supervisor at $1 serves bootstrap data.
+      # We probe /cacerts because that is exactly the first call a joining
+      # server makes, and it is served unauthenticated (HTTP 200).
+      # Do NOT probe /readyz or /version with `curl -f`: both return 401 to
+      # anonymous callers on k3s, so -f turns a healthy master into an
+      # infinite wait loop.
+      #   200      -> serving, safe to join
+      #   401/403  -> answering but auth-gated -> proceed
+      #   000/5xx  -> unreachable or not ready -> keep waiting
+      host="$1"
+      max="$${2:-120}"
+      for i in $(seq 1 "$max"); do
+        code=$(curl -k -s -o /dev/null -w '%%{http_code}' --connect-timeout 5 --max-time 10 "https://$host:6443/cacerts" 2>/dev/null || echo 000)
+        case "$code" in
+          200) echo "$host serving bootstrap data (HTTP 200)"; exit 0 ;;
+          000|500|503) ;;
+          *) echo "$host API answering (HTTP $code) — proceeding"; exit 0 ;;
+        esac
+        echo "Waiting for $host supervisor (HTTP $code)..."
+        sleep 10
+      done
+      echo "Timed out waiting for $host"
+      exit 1
+    permissions: "0755"
+  - path: /usr/local/sbin/hcce-detect-private-iface
+    content: |
+      #!/bin/bash
+      set +e
+      for i in $(seq 1 30); do
+        PRIMARY="$(ip -4 route show default 2>/dev/null | awk '/default/{print $5; exit}')"
+        for iface in $(ls /sys/class/net/ 2>/dev/null); do
+          case "$iface" in
+            lo|docker*|veth*|cni*|flannel*|kube*|br-*|virbr*|tun*|tap*) continue ;;
+          esac
+          [ -e "/sys/class/net/$iface/device" ] || continue
+          [ "$iface" = "$PRIMARY" ] && continue
+          echo "$iface"
+          exit 0
+        done
+        sleep 2
+      done
+      exit 1
     permissions: "0755"
 
 bootcmd:
   - sleep 5
+  - mkdir -p /var/run
   - echo starting > /var/run/hcce-bootstrap.stage
 
 runcmd:
-  - /usr/local/sbin/hcce-stage netplan
-  - netplan apply || true
+  - /usr/local/sbin/hcce-stage detect-private-iface
+  - PRIV=$(/usr/local/sbin/hcce-detect-private-iface); echo "$PRIV" > /var/run/hcce-private-iface
+
+  - /usr/local/sbin/hcce-stage kernel-prep
+  - sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+  # NOTE: do NOT add a "scope link" route for 10.0.0.0/16 here. Hetzner Cloud
+  # networks route peer traffic via the gateway 10.0.0.1 and never answer ARP
+  # for peer IPs. DHCP already installs the correct "via 10.0.0.1" route; a
+  # scope-link route has metric 0, wins over it, and blackholes the private
+  # network ("no route to host" on 10.0.1.x).
+
+  - /usr/local/sbin/hcce-stage wait-master-api
+  - sleep 30
+  - /usr/local/sbin/hcce-wait-api 10.0.1.1 120
+
+  # Retry the join: if we still lost the race with master's etcd, a clean
+  # uninstall + retry recovers instead of leaving a half-joined node.
   - |
-    set -euo pipefail
-    MASTER="10.0.1.1"
-    /usr/local/sbin/hcce-stage wait-private-network
-    for i in $(seq 1 60); do
-      ip link set enp7s0 up 2>/dev/null || true
-      if ip -4 -o addr show dev enp7s0 2>/dev/null | grep -q 'inet '; then
-        break
+    PRIV=$(cat /var/run/hcce-private-iface)
+    for attempt in 1 2 3; do
+      /usr/local/sbin/hcce-stage "k3s-install-$${attempt}"
+      if curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 --token=${k3s_token} --kubelet-arg=cloud-provider=external --flannel-iface=$PRIV --node-ip=10.0.1.2 --disable-cloud-controller --disable traefik" sh -; then
+        sleep 10
+        if systemctl is-active --quiet k3s; then break; fi
       fi
-      netplan apply 2>/dev/null || true
-      sleep 5
-    done
-    if ! ip -4 -o addr show dev enp7s0 2>/dev/null | grep -q 'inet '; then
-      /usr/local/sbin/hcce-stage failed:enp7s0-no-ip
-      exit 1
-    fi
-
-    /usr/local/sbin/hcce-stage wait-master-grace
-    sleep 30
-
-    /usr/local/sbin/hcce-stage wait-master-api
-    while ! curl -k -sf --connect-timeout 5 --max-time 10 "https://${MASTER}:6443/version" >/dev/null 2>&1; do
-      sleep 10
-    done
-
-    /usr/local/sbin/hcce-stage wait-master-readyz
-    while ! curl -k -sf --connect-timeout 5 --max-time 10 "https://${MASTER}:6443/readyz" >/dev/null 2>&1; do
-      sleep 10
-    done
-
-  - |
-    set -euo pipefail
-    K3S_EXEC='server --server https://10.0.1.1:6443 --token=${k3s_token} --flannel-iface=enp7s0 --node-ip=10.0.1.2 --disable-cloud-controller --disable traefik'
-    for attempt in $(seq 1 5); do
-      /usr/local/sbin/hcce-stage "k3s-join-${attempt}"
-      if curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$K3S_EXEC" sh -; then
-        break
-      fi
-      /usr/local/bin/k3s-killall.sh 2>/dev/null || true
-      /usr/local/bin/k3s-uninstall.sh 2>/dev/null || true
-      if [ "$attempt" -eq 5 ]; then
+      if [ "$attempt" = "3" ]; then
         /usr/local/sbin/hcce-stage failed:k3s-join
         exit 1
       fi
+      /usr/local/bin/k3s-killall.sh 2>/dev/null || true
+      /usr/local/bin/k3s-uninstall.sh 2>/dev/null || true
       sleep 30
     done
 
   - /usr/local/sbin/hcce-stage wait-k3s-active
   - sleep 15
-  - while ! systemctl is-active --quiet k3s; do sleep 5; done
+  - while ! systemctl is-active --quiet k3s; do echo "Waiting for K3s server to start..."; sleep 5; done
 
   - /usr/local/sbin/hcce-stage setup-user
   - mkdir -p /home/cluster

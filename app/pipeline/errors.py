@@ -30,11 +30,15 @@ def classify_pipeline_error(message: str) -> str | None:
         for token in (
             "3 nodes",
             "cluster join",
+            "kubeconfig",
+            "bootstrap",
             "cloud-init",
+            "cloud_init",
             "private network",
             "private nic",
             "enp7s0",
             "workers may still be running",
+            "diagnostics.json",
         )
     ):
         return "cluster_join"

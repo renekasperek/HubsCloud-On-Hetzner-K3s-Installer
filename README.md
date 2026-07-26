@@ -12,7 +12,7 @@ Self-contained Docker installer for Hubs Cloud Community Edition on Hetzner (k3s
 ## Quick start
 
 ```bash
-cd installer
+cd HubsCloud-On-Hetzner-K3s-Installer
 docker compose up --build
 ```
 

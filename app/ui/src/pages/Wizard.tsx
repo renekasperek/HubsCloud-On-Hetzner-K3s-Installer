@@ -84,7 +84,16 @@ type ServerType = {
   price_monthly_gross: string | null;
 };
 
-type Presets = Record<string, { master_server_type: string; web_server_type: string; webrtc_server_type: string }>;
+type RoleSpec = { cores: number; memory_gb: number };
+type SizeRecommendations = Record<string, { master: RoleSpec; web: RoleSpec; webrtc: RoleSpec }>;
+
+function formatRoleSpec(spec: RoleSpec) {
+  return `${spec.cores} vCPU, ${spec.memory_gb} GB RAM`;
+}
+
+function formatSizeRecommendation(size: string, rec: SizeRecommendations[string]) {
+  return `Master ${formatRoleSpec(rec.master)} · Web worker ${formatRoleSpec(rec.web)} · WebRTC worker ${formatRoleSpec(rec.webrtc)}`;
+}
 
 function formatTypeLabel(t: ServerType) {
   const price = t.price_monthly_gross ? ` · €${t.price_monthly_gross}/mo` : "";
@@ -107,12 +116,11 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
 
   const [locations, setLocations] = useState<Location[]>([]);
   const [serverTypes, setServerTypes] = useState<ServerType[]>([]);
-  const [presets, setPresets] = useState<Presets>({});
+  const [sizeRecommendations, setSizeRecommendations] = useState<SizeRecommendations>({});
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
   const [serverTypesOk, setServerTypesOk] = useState<boolean | null>(null);
   const [serverTypesMsg, setServerTypesMsg] = useState("");
-  const presetAppliedRef = useRef(false);
 
   useEffect(() => {
     api<{ spec: Spec }>(`/instances/${instanceId}`).then((d) => {
@@ -127,28 +135,42 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
     };
   }, []);
 
-  const location = (spec.location as string) || "nbg1";
+  const location = (spec.location as string) || "";
 
-  useEffect(() => {
-    presetAppliedRef.current = false;
-  }, [location]);
-
-  const loadCatalog = useCallback(async () => {
+  const loadLocations = useCallback(async () => {
     setCatalogLoading(true);
     setCatalogError("");
     try {
-      const [locRes, typesRes, presetRes] = await Promise.all([
+      const [locRes, recRes] = await Promise.all([
         api<{ locations: Location[] }>(`/instances/${instanceId}/hetzner/locations`),
-        api<{ server_types: ServerType[] }>(`/instances/${instanceId}/hetzner/server-types?location=${encodeURIComponent(location)}`),
-        api<{ presets: Presets }>(`/instances/${instanceId}/hetzner/presets?location=${encodeURIComponent(location)}`),
+        api<{ recommendations: SizeRecommendations }>(`/instances/${instanceId}/hetzner/cluster-size-recommendations`),
       ]);
       setLocations(locRes.locations);
+      setSizeRecommendations(recRes.recommendations);
+    } catch (e) {
+      setCatalogError(e instanceof Error ? e.message : "Could not load Hetzner locations");
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [instanceId]);
+
+  const loadServerTypes = useCallback(async () => {
+    if (!location) {
+      setServerTypes([]);
+      return;
+    }
+    setCatalogLoading(true);
+    setCatalogError("");
+    try {
+      const typesRes = await api<{ server_types: ServerType[] }>(
+        `/instances/${instanceId}/hetzner/server-types?location=${encodeURIComponent(location)}`
+      );
       setServerTypes(typesRes.server_types);
-      setPresets(presetRes.presets);
       setServerTypesOk(null);
       setServerTypesMsg("");
     } catch (e) {
-      setCatalogError(e instanceof Error ? e.message : "Could not load Hetzner catalog");
+      setCatalogError(e instanceof Error ? e.message : "Could not load server types for this location");
+      setServerTypes([]);
     } finally {
       setCatalogLoading(false);
     }
@@ -156,10 +178,15 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
 
   useEffect(() => {
     if (step === 2 && tokenOk === true) {
-      presetAppliedRef.current = false;
-      void loadCatalog();
+      void loadLocations();
     }
-  }, [step, tokenOk, loadCatalog]);
+  }, [step, tokenOk, loadLocations]);
+
+  useEffect(() => {
+    if (step === 2 && tokenOk === true && location) {
+      void loadServerTypes();
+    }
+  }, [step, tokenOk, location, loadServerTypes]);
 
   useEffect(() => {
     if (step > 0 && tokenOk !== true) {
@@ -182,25 +209,19 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
     [instanceId]
   );
 
-  useEffect(() => {
-    if (step !== 2 || catalogLoading || !presets.medium || presetAppliedRef.current) return;
-    const hasCustom =
-      specRef.current.master_server_type ||
-      specRef.current.worker_server_type ||
-      specRef.current.webrtc_server_type;
-    if (!hasCustom) {
-      presetAppliedRef.current = true;
-      const size = (specRef.current.cluster_size as "small" | "medium" | "large") || "medium";
-      const p = presets[size] || presets.medium;
-      void saveSpec({
-        ...specRef.current,
-        cluster_size: size,
-        master_server_type: p.master_server_type,
-        worker_server_type: p.web_server_type,
-        webrtc_server_type: p.webrtc_server_type,
-      });
-    }
-  }, [step, catalogLoading, presets, saveSpec]);
+  const selectClusterSize = (size: "small" | "medium" | "large") => {
+    patchAndSave({ cluster_size: size });
+    setServerTypesOk(null);
+  };
+
+  const resolvedTypes = useMemo(
+    () => ({
+      master: (spec.master_server_type as string) || "",
+      web: (spec.worker_server_type as string) || "",
+      webrtc: (spec.webrtc_server_type as string) || "",
+    }),
+    [spec.master_server_type, spec.worker_server_type, spec.webrtc_server_type]
+  );
 
   const patchLocal = (patch: Spec) => {
     setSpec((prev) => {
@@ -234,31 +255,6 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
     all[app] = { ...getAppImageCfg(specRef.current, app), ...patch };
     patchAndSave({ core_app_images: all });
   };
-
-  const applySizePreset = (size: "small" | "medium" | "large") => {
-    const p = presets[size];
-    if (p) {
-      patchAndSave({
-        cluster_size: size,
-        master_server_type: p.master_server_type,
-        worker_server_type: p.web_server_type,
-        webrtc_server_type: p.webrtc_server_type,
-      });
-    } else {
-      patchAndSave({ cluster_size: size });
-    }
-    setServerTypesOk(null);
-  };
-
-  const resolvedTypes = useMemo(() => {
-    const size = (spec.cluster_size as string) || "medium";
-    const fallback = presets[size];
-    return {
-      master: (spec.master_server_type as string) || fallback?.master_server_type || "",
-      web: (spec.worker_server_type as string) || fallback?.web_server_type || "",
-      webrtc: (spec.webrtc_server_type as string) || fallback?.webrtc_server_type || "",
-    };
-  }, [spec, presets]);
 
   const validateToken = async (): Promise<boolean> => {
     const token = String(specRef.current.hetzner_api_token || "").trim();
@@ -344,7 +340,10 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
 
   const locationOptions = locations.length
     ? locations
-    : ["nbg1", "fsn1", "hel1", "ash", "hil"].map((name) => ({ name, description: "", city: "", country: "" }));
+    : [];
+
+  const activeSize = ((spec.cluster_size as string) || "medium") as "small" | "medium" | "large";
+  const activeRecommendation = sizeRecommendations[activeSize];
 
   return (
     <div className="wizard-workspace">
@@ -448,10 +447,18 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                 id="loc"
                 value={location}
                 onChange={(e) => {
-                  patchAndSave({ location: e.target.value });
+                  patchAndSave({
+                    location: e.target.value,
+                    master_server_type: "",
+                    worker_server_type: "",
+                    webrtc_server_type: "",
+                  });
                   setServerTypesOk(null);
                 }}
               >
+                <option value="" disabled>
+                  Choose location…
+                </option>
                 {locationOptions.map((l) => (
                   <option key={l.name} value={l.name}>
                     {l.name}
@@ -461,41 +468,45 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
               </select>
             </div>
 
-            {catalogLoading && <p className="muted">Loading available server types…</p>}
+            {!location && !catalogLoading && (
+              <p className="muted">Choose a location to load available server types for that region.</p>
+            )}
+
+            {catalogLoading && <p className="muted">Loading from Hetzner…</p>}
             {catalogError && (
               <div className="panel bad-text" style={{ marginBottom: 12 }}>
                 {catalogError}
-                <button type="button" className="btn btn-outline" style={{ marginTop: 8 }} onClick={() => void loadCatalog()}>
-                  Retry catalog
+                <button type="button" className="btn btn-outline" style={{ marginTop: 8 }} onClick={() => { void loadLocations(); if (location) void loadServerTypes(); }}>
+                  Retry
                 </button>
               </div>
             )}
 
             <div className="field">
-              <label>Cluster size preset</label>
+              <label>Cluster size guidance</label>
               <div className="segmented">
                 {(["small", "medium", "large"] as const).map((s) => (
                   <button
                     key={s}
                     type="button"
                     className={`segmented-btn${spec.cluster_size === s ? " is-active" : ""}`}
-                    onClick={() => applySizePreset(s)}
-                    disabled={catalogLoading}
+                    onClick={() => selectClusterSize(s)}
                   >
                     {s}
                   </button>
                 ))}
               </div>
-              {presets[(spec.cluster_size as string) || "medium"] && (
+              {activeRecommendation && (
                 <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
-                  Preset maps to master {presets[(spec.cluster_size as string) || "medium"].master_server_type}, web{" "}
-                  {presets[(spec.cluster_size as string) || "medium"].web_server_type}, webrtc{" "}
-                  {presets[(spec.cluster_size as string) || "medium"].webrtc_server_type}
+                  Recommended resources ({activeSize}): {formatSizeRecommendation(activeSize, activeRecommendation)}
                 </p>
               )}
+              <p className="muted" style={{ marginTop: 8, fontSize: 13, marginBottom: 0 }}>
+                Pick matching server types below — names differ by location.
+              </p>
             </div>
 
-            {serverTypes.length > 0 && (
+            {location && serverTypes.length > 0 && (
               <>
                 <div className="field">
                   <label htmlFor="master-type">Master (database) server type</label>
@@ -507,6 +518,9 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                       setServerTypesOk(null);
                     }}
                   >
+                    <option value="" disabled>
+                      Choose master server type…
+                    </option>
                     {serverTypes.map((t) => (
                       <option key={t.name} value={t.name}>
                         {formatTypeLabel(t)}
@@ -525,6 +539,9 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                       setServerTypesOk(null);
                     }}
                   >
+                    <option value="" disabled>
+                      Choose web worker server type…
+                    </option>
                     {serverTypes.map((t) => (
                       <option key={t.name} value={t.name}>
                         {formatTypeLabel(t)}
@@ -543,6 +560,9 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                       setServerTypesOk(null);
                     }}
                   >
+                    <option value="" disabled>
+                      Choose WebRTC worker server type…
+                    </option>
                     {serverTypes.map((t) => (
                       <option key={t.name} value={t.name}>
                         {formatTypeLabel(t)}
@@ -828,8 +848,8 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
               <div className="cluster">
                 <p className="cluster-title">Infrastructure</p>
                 <p><strong>Domain:</strong> {String(spec.hub_domain || "—")}</p>
-                <p><strong>Location:</strong> {String(spec.location || "nbg1")}</p>
-                <p><strong>Size:</strong> {String(spec.cluster_size || "medium")}</p>
+                <p><strong>Location:</strong> {String(spec.location || "—")}</p>
+                <p><strong>Size guidance:</strong> {String(spec.cluster_size || "medium")}</p>
                 <p><strong>Master:</strong> {resolvedTypes.master || "—"}</p>
                 <p><strong>Web:</strong> {resolvedTypes.web || "—"}</p>
                 <p><strong>WebRTC:</strong> {resolvedTypes.webrtc || "—"}</p>

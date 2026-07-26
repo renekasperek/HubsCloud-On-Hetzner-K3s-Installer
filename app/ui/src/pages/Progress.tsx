@@ -106,6 +106,10 @@ function issueLabel(issue: string | null) {
       return "Private network problem";
     case "cloud_init_running":
       return "Setting up";
+    case "cloud_init_error":
+      return "Cloud-init failed";
+    case "k3s_service_failed":
+      return "K3s service failed";
     case "k3s_inactive":
       return "Kubernetes not running";
     case "ssh_unreachable":
@@ -171,7 +175,7 @@ function interventionHint(intervention?: string | null) {
     case "destroy":
       return "Could not delete all Hetzner resources automatically. Check the activity log, finish any remaining deletes in the Hetzner Console, then retry Destroy or provision again.";
     case "cluster_join":
-      return "One or more servers didn't join the cluster. Your Hetzner servers are still running and billing. Try automatic repair first (safe — does not delete servers). If you retry provisioning after a join failure, worker VMs are recreated automatically for fresh cloud-init.";
+      return "The pipeline diagnosed the problem automatically — read the error above for the root cause and per-node status. Try automatic repair first (safe — does not delete servers). If bootstrap failed on a worker, use Retry provisioning to recreate workers with fresh cloud-init.";
     default:
       return "Review the error and activity log, fix the configuration, then retry provisioning.";
   }
@@ -500,7 +504,7 @@ export function ProgressPage({ instanceId }: { instanceId: string }) {
 
       {status?.state === "failed" && (
         <div className="panel failure-banner">
-          <strong className="bad-text">{status.error || status.message}</strong>
+          <strong className="bad-text failure-error">{status.error || status.message}</strong>
           <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
             {interventionHint(status.intervention)}
           </p>

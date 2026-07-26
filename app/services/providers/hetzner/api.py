@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from schemas.models import SIZE_PRESETS
+from schemas.models import CLUSTER_SIZE_RECOMMENDATIONS
 from services.providers.base import CLUSTER_SERVER_NAMES
 
 HCLOUD_BASE = "https://api.hetzner.cloud/v1"
@@ -303,24 +303,9 @@ def fetch_server_types_for_location(token: str, location: str) -> list[ServerTyp
     return options
 
 
-def suggest_presets(token: str, location: str) -> dict[str, dict[str, str]]:
-    """Return curated small/medium/large server types (validated against location catalog when possible)."""
-    try:
-        options = {o.name: o for o in fetch_server_types_for_location(token, location)}
-    except httpx.HTTPError:
-        return {size: dict(preset) for size, preset in SIZE_PRESETS.items()}
-
-    out: dict[str, dict[str, str]] = {}
-    for size, preset in SIZE_PRESETS.items():
-        resolved: dict[str, str] = {}
-        for role, name in preset.items():
-            opt = options.get(name)
-            if opt and opt.available and not opt.deprecated:
-                resolved[role] = name
-            else:
-                resolved[role] = name
-        out[size] = resolved
-    return out
+def cluster_size_recommendations() -> dict[str, dict[str, dict[str, int]]]:
+    """Static vCPU/RAM guidance per cluster size — not tied to Hetzner type names."""
+    return {size: dict(roles) for size, roles in CLUSTER_SIZE_RECOMMENDATIONS.items()}
 
 
 def estimate_cluster_monthly_cost(
@@ -352,13 +337,24 @@ def validate_server_types(
     webrtc: str,
 ) -> tuple[bool, str, list[str]]:
     """Return ok, message, list of invalid type names."""
+    if not (location or "").strip():
+        return False, "Choose a Hetzner location first", []
+
+    messages: list[str] = []
+    invalid: list[str] = []
+    for role, name in [("master", master), ("web", web), ("webrtc", webrtc)]:
+        if not (name or "").strip():
+            invalid.append(name or role)
+            messages.append(f"{role}: choose a server type for this location")
+
+    if messages:
+        return False, "; ".join(messages), invalid
+
     try:
         options = {o.name: o for o in fetch_server_types_for_location(token, location)}
     except httpx.HTTPError as e:
         return False, f"Could not fetch server types: {e}", []
 
-    invalid: list[str] = []
-    messages: list[str] = []
     for role, name in [("master", master), ("web", web), ("webrtc", webrtc)]:
         opt = options.get(name)
         if opt is None:

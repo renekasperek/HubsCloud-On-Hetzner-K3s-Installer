@@ -926,6 +926,13 @@ code {
   margin-bottom: 24px;
 }
 
+.failure-error {
+  display: block;
+  white-space: pre-wrap;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
 .image-options {
   display: flex;
   flex-direction: column;

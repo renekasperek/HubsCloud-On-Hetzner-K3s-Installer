@@ -85,39 +85,9 @@ def fetch_bootstrap_status(key: Path, public_ip: str) -> tuple[str | None, str |
 
 
 def log_bootstrap_stages(instance_id: str) -> None:
-    key = _ssh_key(instance_id)
-    if not key:
-        return
+    from services.node_diagnostics import log_cluster_diagnostics
 
-    spec = load_spec(instance_id)
-    hetzner_servers: dict[str, dict] = {}
-    if spec.hetzner_api_token:
-        try:
-            hetzner_servers = fetch_cluster_servers(spec.hetzner_api_token)
-        except Exception as e:
-            append_log(instance_id, f"Bootstrap status: could not list Hetzner servers ({e})")
-            return
-
-    for expected in EXPECTED_NODES:
-        name = expected["name"]
-        hc = hetzner_servers.get(name, {})
-        public_ip = server_public_ip(hc) if hc else ""
-        if not public_ip:
-            append_log(instance_id, f"[{name}] bootstrap: no public IP yet")
-            continue
-
-        reachable, ssh_issue = ssh_diagnose(key, public_ip)
-        if not reachable:
-            append_log(instance_id, f"[{name}] bootstrap: SSH unreachable ({ssh_issue or 'unknown'})")
-            continue
-
-        stage, last_log = fetch_bootstrap_status(key, public_ip)
-        stage_text = stage or "unknown"
-        if last_log:
-            detail = last_log if len(last_log) <= 120 else last_log[:117] + "..."
-            append_log(instance_id, f"[{name}] bootstrap stage={stage_text} — {detail}")
-        else:
-            append_log(instance_id, f"[{name}] bootstrap stage={stage_text}")
+    log_cluster_diagnostics(instance_id)
 
 
 def classify_node_issue(
@@ -157,6 +127,8 @@ def classify_node_issue(
             return "private_network_down"
 
     ok, ci_out = ssh_probe(key, public_ip, "cloud-init status 2>/dev/null || echo unknown")
+    if ok and "error" in ci_out.lower():
+        return "cloud_init_error"
     if ok and "running" in ci_out.lower():
         return "cloud_init_running"
 
@@ -235,8 +207,15 @@ def get_cluster_join_status(instance_id: str) -> ClusterJoinStatus:
         bootstrap_log: str | None = None
         is_master = name == "hcce-master-db"
         if not k8s_present and key and public_ip:
-            issue = classify_node_issue(key, public_ip, is_master=is_master)
-            bootstrap_stage, bootstrap_log = fetch_bootstrap_status(key, public_ip)
+            from services.node_diagnostics import probe_node
+
+            node_diag = probe_node(key, name, public_ip)
+            bootstrap_stage = node_diag.bootstrap_stage or None
+            bootstrap_log = node_diag.bootstrap_log_tail or None
+            if node_diag.fatal:
+                issue = node_diag.fatal
+            else:
+                issue = classify_node_issue(key, public_ip, is_master=is_master)
         elif not k8s_present and not hc:
             issue = "hetzner_missing"
         elif not k8s_present:

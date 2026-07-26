@@ -25,16 +25,18 @@ NETPLAN_CONTENT = """network:
 K3S_INSTALL: dict[str, str] = {
     "hcce-master-db": (
         'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable-cloud-controller '
-        '--disable traefik --flannel-iface=enp7s0 --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 '
+        '--kubelet-arg=cloud-provider=external --disable traefik --flannel-iface=enp7s0 --cluster-cidr=10.42.0.0/16 --service-cidr=10.43.0.0/16 '
         '--tls-san=10.0.1.1 --token={token}" sh -'
     ),
     "hcce-webrtc-worker": (
         'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 '
-        '--token={token} --flannel-iface=enp7s0 --node-ip=10.0.1.2 --disable-cloud-controller --disable traefik" sh -'
+        '--token={token} --flannel-iface=enp7s0 --node-ip=10.0.1.2 --disable-cloud-controller '
+        '--kubelet-arg=cloud-provider=external --disable traefik" sh -'
     ),
     "hcce-web-worker": (
         'curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://10.0.1.1:6443 '
-        '--token={token} --flannel-iface=enp7s0 --node-ip=10.0.1.3 --disable-cloud-controller --disable traefik" sh -'
+        '--token={token} --flannel-iface=enp7s0 --node-ip=10.0.1.3 --disable-cloud-controller '
+        '--kubelet-arg=cloud-provider=external --disable traefik" sh -'
     ),
 }
 
@@ -118,8 +120,55 @@ def repair_node(instance_id: str, server_name: str, issue: str | None, public_ip
         return {"server": server_name, "ok": False, "action": "ssh_key_mismatch", "detail": "SSH key rejected"}
 
     if issue == "cloud_init_running":
-        append_log(instance_id, f"Repair: {server_name} cloud-init still running — waiting")
-        return {"server": server_name, "ok": True, "action": "wait", "detail": "cloud-init in progress"}
+        from services.node_diagnostics import probe_node
+
+        diag = probe_node(key, server_name, public_ip)
+        append_log(
+            instance_id,
+            f"Repair: {server_name} cloud-init in progress — {diag.summary}"
+            + (f" (stage={diag.bootstrap_stage})" if diag.bootstrap_stage else ""),
+        )
+        if diag.fatal:
+            return {
+                "server": server_name,
+                "ok": False,
+                "action": diag.fatal,
+                "detail": diag.summary,
+            }
+        return {"server": server_name, "ok": True, "action": "wait", "detail": diag.summary or "cloud-init in progress"}
+
+    if issue == "cloud_init_error":
+        from services.node_diagnostics import probe_node
+
+        diag = probe_node(key, server_name, public_ip)
+        append_log(instance_id, f"Repair: {server_name} cloud-init failed — {diag.summary}")
+        return {
+            "server": server_name,
+            "ok": False,
+            "action": "cloud_init_error",
+            "detail": diag.summary or "Cloud-init failed",
+        }
+
+    if issue and issue.startswith("failed:"):
+        append_log(instance_id, f"Repair: {server_name} bootstrap failed — {issue}")
+        return {
+            "server": server_name,
+            "ok": False,
+            "action": issue,
+            "detail": issue.replace("failed:", "Bootstrap failed: ").replace("-", " "),
+        }
+
+    if issue == "k3s_service_failed":
+        from services.node_diagnostics import probe_node
+
+        diag = probe_node(key, server_name, public_ip)
+        append_log(instance_id, f"Repair: {server_name} K3s service failed — {diag.summary}")
+        return {
+            "server": server_name,
+            "ok": False,
+            "action": "k3s_service_failed",
+            "detail": diag.summary or "K3s service failed",
+        }
 
     if issue in ("private_network_down", "hetzner_missing", None):
         if issue != "private_network_down":
@@ -178,12 +227,20 @@ def repair_cluster_join(instance_id: str) -> dict:
 
     ok = all(r.get("ok") for r in results) if results else True
     after = diagnose(instance_id)
+    from services.node_diagnostics import log_cluster_diagnostics
+
+    diagnostics = log_cluster_diagnostics(instance_id)
     append_log(
         instance_id,
         f"Cluster join repair finished — {after.joined_ready}/{after.expected_nodes} ready",
     )
+    if not ok:
+        failed = [r for r in results if not r.get("ok")]
+        details = "; ".join(f"{r['server']}: {r.get('detail', '?')}" for r in failed)
+        append_log(instance_id, f"Repair could not fix: {details}")
     return {
         "ok": ok,
         "results": results,
         "join_status": after.model_dump(),
+        "diagnostics": [d.to_dict() for d in diagnostics],
     }

@@ -26,7 +26,7 @@ __all__ = [  # noqa: F822
     "wait_for_ingress_load_balancer_ip",
     "fetch_locations",
     "fetch_server_types_for_location",
-    "suggest_presets",
+    "cluster_size_recommendations",
     "estimate_cluster_monthly_cost",
     "validate_server_types",
     "server_public_ip",

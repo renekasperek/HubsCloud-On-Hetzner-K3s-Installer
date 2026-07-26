@@ -6,6 +6,14 @@ import time
 from config import instance_dir
 from pipeline.core import PipelineError, kube_env, run_cmd, update_status
 from pipeline.terraform_ops import terraform_output
+from services.node_diagnostics import (
+    MASTER_KUBECONFIG_TIMEOUT_SECONDS,
+    check_stuck_stage,
+    first_fatal,
+    log_cluster_diagnostics,
+    pipeline_failure_message,
+    probe_node,
+)
 from services.ssh import ssh_args, ssh_auth_ok, ssh_cat_file, ssh_err_snippet
 from services.storage import append_log
 
@@ -24,15 +32,15 @@ def fetch_kubeconfig(instance_id: str, master_ip: str) -> None:
     ]
     users = ["cluster", "root"]
 
-    deadline = time.time() + 900
-    last_err = ""
-    attempt = 0
+    deadline = time.time() + MASTER_KUBECONFIG_TIMEOUT_SECONDS
+    last_report_at = 0.0
+    stage_tracker: dict[str, tuple[str, float]] = {}
+    master_name = "hcce-master-db"
+
     while time.time() < deadline:
-        attempt += 1
         for user in users:
             ok, err_msg = ssh_auth_ok(key, master_ip, user)
             if not ok:
-                append_log(instance_id, f"SSH auth {user}@{master_ip}: {err_msg}")
                 continue
             for remote_path in remote_paths:
                 ok, content, err = ssh_cat_file(key, master_ip, user, remote_path)
@@ -41,17 +49,45 @@ def fetch_kubeconfig(instance_id: str, master_ip: str) -> None:
                     kube_dest.write_text(kc)
                     append_log(instance_id, f"Fetched kubeconfig from {user}@{master_ip}:{remote_path}")
                     return
-                last_err = f"{user}@{master_ip}:{remote_path}: {err}"
-                append_log(instance_id, last_err)
-        append_log(
-            instance_id,
-            f"Waiting for SSH/k3s on {master_ip} (attempt {attempt}) — need cluster or root auth + k3s.yaml",
-        )
+
+        now = time.time()
+        if now - last_report_at >= 60:
+            last_report_at = now
+            diag = probe_node(key, master_name, master_ip)
+            append_log(
+                instance_id,
+                f"[{master_name}] {diag.summary}"
+                + (f" | cloud-init: {diag.cloud_init_status}" if diag.cloud_init_status else "")
+                + (f" | k3s: {diag.k3s_active}" if diag.k3s_active else ""),
+            )
+            if diag.fatal:
+                diagnostics = log_cluster_diagnostics(instance_id)
+                raise PipelineError(
+                    pipeline_failure_message(
+                        "Master node bootstrap failed before K3s kubeconfig was available.",
+                        diagnostics,
+                    )
+                )
+            stuck = check_stuck_stage(stage_tracker, master_name, diag.bootstrap_stage, now=now)
+            if stuck:
+                diagnostics = log_cluster_diagnostics(instance_id)
+                raise PipelineError(
+                    pipeline_failure_message(
+                        f"Master bootstrap appears stuck: {stuck}",
+                        diagnostics,
+                        "Retry provisioning recreates the VMs with fresh cloud-init.",
+                    )
+                )
+
         time.sleep(20)
+
+    diagnostics = log_cluster_diagnostics(instance_id)
     raise PipelineError(
-        f"Failed to fetch kubeconfig after 15m. Last: {last_err}. "
-        "Ensure Generate key pair was used and matches Terraform. "
-        "If servers predate cloud-init ssh_authorized_keys, taint/recreate hcloud_server resources."
+        pipeline_failure_message(
+            f"Timed out after {MASTER_KUBECONFIG_TIMEOUT_SECONDS // 60} minutes waiting for master K3s kubeconfig.",
+            diagnostics,
+            "If SSH key mismatch is reported, regenerate the key pair and reprovision.",
+        )
     )
 
 
@@ -59,7 +95,8 @@ def wait_nodes_ready(instance_id: str, timeout: int = 1200) -> None:
     import json
 
     from pipeline.cluster_repair import repair_cluster_join
-    from services.cluster_join import diagnose, log_bootstrap_stages
+    from services.cluster_join import diagnose
+    from services.node_diagnostics import check_stuck_stage, first_fatal, log_cluster_diagnostics
     from services.storage import load_spec
 
     spec = load_spec(instance_id)
@@ -67,6 +104,7 @@ def wait_nodes_ready(instance_id: str, timeout: int = 1200) -> None:
     last_logged = 0.0
     last_diagnose = 0.0
     auto_repair_attempted = False
+    stage_tracker: dict[str, tuple[str, float]] = {}
     expected = 3
 
     while time.time() < deadline:
@@ -95,7 +133,27 @@ def wait_nodes_ready(instance_id: str, timeout: int = 1200) -> None:
 
         if time.time() - last_diagnose >= 60:
             last_diagnose = time.time()
-            log_bootstrap_stages(instance_id)
+            diagnostics = log_cluster_diagnostics(instance_id)
+            fatal = first_fatal(diagnostics)
+            if fatal:
+                raise PipelineError(
+                    pipeline_failure_message(
+                        "Cluster join failed during node bootstrap.",
+                        diagnostics,
+                    )
+                )
+            now = time.time()
+            for d in diagnostics:
+                stuck = check_stuck_stage(stage_tracker, d.name, d.bootstrap_stage, now=now)
+                if stuck:
+                    raise PipelineError(
+                        pipeline_failure_message(
+                            f"Node bootstrap appears stuck: {stuck}",
+                            diagnostics,
+                            "Use Retry provisioning on the progress page to recreate worker VMs.",
+                        )
+                    )
+
             join_status = diagnose(instance_id)
             if join_status.missing and join_status.stuck_seconds >= 600:
                 missing_list = ", ".join(join_status.missing)
@@ -113,11 +171,14 @@ def wait_nodes_ready(instance_id: str, timeout: int = 1200) -> None:
 
         time.sleep(15)
 
-    join_status = diagnose(instance_id)
-    missing = ", ".join(join_status.missing) if join_status.missing else "unknown"
+    diagnostics = log_cluster_diagnostics(instance_id)
+    missing = ", ".join(d.name for d in diagnostics if d.k3s_active != "active") or "see diagnostics"
     raise PipelineError(
-        f"Timeout waiting for 3 nodes to become Ready — missing or not ready: {missing}. "
-        "Try automatic repair from the progress page."
+        pipeline_failure_message(
+            f"Timed out waiting for all {expected} nodes to become Ready — problem nodes: {missing}",
+            diagnostics,
+            "Try automatic repair from the progress page, or retry provisioning to recreate workers.",
+        )
     )
 
 

@@ -53,8 +53,13 @@ def ssh_auth_ok(key: Path, host: str, user: str, *, timeout: int = 30) -> tuple[
 
 
 def ssh_cat_file(key: Path, host: str, user: str, remote_path: str, *, timeout: int = 90) -> tuple[bool, str, str]:
+    remote = (
+        f"if [ ! -e '{remote_path}' ]; then echo 'not found' >&2; exit 2; "
+        f"elif [ ! -r '{remote_path}' ]; then echo 'not readable' >&2; exit 3; "
+        f"else cat '{remote_path}'; fi"
+    )
     result = subprocess.run(
-        ["ssh", *ssh_args(key), f"{user}@{host}", f"test -r '{remote_path}' && cat '{remote_path}'"],
+        ["ssh", *ssh_args(key), f"{user}@{host}", remote],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -62,7 +67,14 @@ def ssh_cat_file(key: Path, host: str, user: str, remote_path: str, *, timeout: 
     )
     if result.returncode == 0 and len(result.stdout) > 50:
         return True, result.stdout, ""
-    return False, "", ssh_err_snippet(result)
+    if result.returncode == 2:
+        return False, "", "file not found yet"
+    if result.returncode == 3:
+        return False, "", "file not readable"
+    err = (result.stderr or result.stdout or "").strip()
+    if not err:
+        err = f"ssh exit {result.returncode}"
+    return False, "", err[:240]
 
 
 def ssh_diagnose(key: Path, host: str) -> tuple[bool, str | None]:

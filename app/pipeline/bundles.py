@@ -149,6 +149,9 @@ def build_debug_bundle(instance_id: str) -> bytes:
         zf.writestr("status.json", status.model_dump_json(indent=2))
         zf.writestr("spec-redacted.json", json.dumps(redacted, indent=2))
         zf.writestr("cluster-join-status.json", join_status.model_dump_json(indent=2))
+        diag_path = instance_dir(instance_id) / "diagnostics.json"
+        if diag_path.exists():
+            zf.writestr("diagnostics.json", diag_path.read_text())
         zf.writestr("pipeline.log", "\n".join(log_lines) + ("\n" if log_lines else ""))
         kc = instance_dir(instance_id) / "kubeconfig"
         if kc.exists():

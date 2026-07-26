@@ -44,7 +44,7 @@ resource "hcloud_firewall" "open_firewall" {
         port       = port
         source_ips = ["0.0.0.0/0", "::/0"]
       }
-    ] : [
+      ] : [
       {
         direction  = "in"
         protocol   = "tcp"
@@ -68,7 +68,7 @@ resource "hcloud_firewall" "open_firewall" {
         port       = "35000-60000"
         source_ips = ["0.0.0.0/0", "::/0"]
       }
-    ] : [
+      ] : [
       {
         direction  = "in"
         protocol   = "udp"
@@ -146,6 +146,20 @@ resource "hcloud_server" "master_node" {
     ssh_public_key = chomp(file(var.ssh_public_key_path))
   })
 
+  # The hcloud provider never writes `location` back into state (it stays ""
+  # on every server, on every instance we have ever created), while the config
+  # always sets it. Because `location` is ForceNew, that permanent diff makes
+  # EVERY apply want to destroy and recreate all three servers — which is how
+  # firewall hardening once wiped a running cluster.
+  #
+  # A server's location cannot be changed in place; Hetzner has no move
+  # operation. So a genuine location change can only be realised by an explicit
+  # destroy + create, never by an in-place apply. Ignoring it here is therefore
+  # safe, and does NOT affect server_type: resizing still replaces as expected.
+  lifecycle {
+    ignore_changes = [location]
+  }
+
   depends_on = [
     hcloud_network_subnet.private_network_subnet,
     hcloud_firewall.open_firewall,
@@ -182,6 +196,20 @@ resource "hcloud_server" "webrtc_worker" {
     k3s_token      = var.k3s_token
     ssh_public_key = chomp(file(var.ssh_public_key_path))
   })
+
+  # The hcloud provider never writes `location` back into state (it stays ""
+  # on every server, on every instance we have ever created), while the config
+  # always sets it. Because `location` is ForceNew, that permanent diff makes
+  # EVERY apply want to destroy and recreate all three servers — which is how
+  # firewall hardening once wiped a running cluster.
+  #
+  # A server's location cannot be changed in place; Hetzner has no move
+  # operation. So a genuine location change can only be realised by an explicit
+  # destroy + create, never by an in-place apply. Ignoring it here is therefore
+  # safe, and does NOT affect server_type: resizing still replaces as expected.
+  lifecycle {
+    ignore_changes = [location]
+  }
 
   depends_on = [
     hcloud_server.master_node,
@@ -221,6 +249,20 @@ resource "hcloud_server" "web_worker" {
     k3s_token      = var.k3s_token
     ssh_public_key = chomp(file(var.ssh_public_key_path))
   })
+
+  # The hcloud provider never writes `location` back into state (it stays ""
+  # on every server, on every instance we have ever created), while the config
+  # always sets it. Because `location` is ForceNew, that permanent diff makes
+  # EVERY apply want to destroy and recreate all three servers — which is how
+  # firewall hardening once wiped a running cluster.
+  #
+  # A server's location cannot be changed in place; Hetzner has no move
+  # operation. So a genuine location change can only be realised by an explicit
+  # destroy + create, never by an in-place apply. Ignoring it here is therefore
+  # safe, and does NOT affect server_type: resizing still replaces as expected.
+  lifecycle {
+    ignore_changes = [location]
+  }
 
   depends_on = [
     hcloud_server.master_node,

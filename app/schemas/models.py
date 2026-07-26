@@ -23,14 +23,26 @@ class ClusterSize(str, Enum):
     large = "large"
 
 
-SIZE_PRESETS: dict[str, dict[str, str]] = {
-    # Curated defaults per cluster_size (wizard + fallback when Hetzner API unavailable).
-    "small": {"master_server_type": "cx23", "web_server_type": "cpx12", "webrtc_server_type": "cpx12"},
-    "medium": {"master_server_type": "cpx13", "web_server_type": "cx23", "webrtc_server_type": "cx23"},
-    "large": {"master_server_type": "cpx32", "web_server_type": "cx23", "webrtc_server_type": "cpx13"},
+# Resource guidance only — does not map to Hetzner type names (those vary by location).
+CLUSTER_SIZE_RECOMMENDATIONS: dict[str, dict[str, dict[str, int]]] = {
+    "small": {
+        "master": {"cores": 2, "memory_gb": 4},
+        "web": {"cores": 1, "memory_gb": 2},
+        "webrtc": {"cores": 1, "memory_gb": 2},
+    },
+    "medium": {
+        "master": {"cores": 2, "memory_gb": 4},
+        "web": {"cores": 1, "memory_gb": 2},
+        "webrtc": {"cores": 2, "memory_gb": 4},
+    },
+    "large": {
+        "master": {"cores": 4, "memory_gb": 8},
+        "web": {"cores": 2, "memory_gb": 4},
+        "webrtc": {"cores": 2, "memory_gb": 4},
+    },
 }
 
-ALLOWED_LOCATIONS = {"nbg1", "fsn1", "hel1", "ash", "hil"}  # default wizard options; API may return more
+ALLOWED_LOCATIONS = {"nbg1", "fsn1", "hel1", "ash", "hil"}  # fallback when API unavailable
 
 
 class InstanceSpec(BaseModel):
@@ -39,7 +51,7 @@ class InstanceSpec(BaseModel):
     hetzner_api_token: str = ""
     hub_domain: str = ""
     admin_email: str = ""
-    location: str = "nbg1"
+    location: str = ""
     cluster_size: ClusterSize = ClusterSize.medium
     master_server_type: str | None = None
     worker_server_type: str | None = None
@@ -76,9 +88,11 @@ class InstanceSpec(BaseModel):
     @field_validator("location")
     @classmethod
     def validate_location(cls, v: str) -> str:
-        v = v.strip().lower()
-        if not v or len(v) > 32:
-            raise ValueError("location must be a non-empty Hetzner location code")
+        v = (v or "").strip().lower()
+        if not v:
+            return ""
+        if len(v) > 32:
+            raise ValueError("location must be a valid Hetzner location code")
         return v
 
     @field_validator("smtp_port")
@@ -119,11 +133,10 @@ class InstanceSpec(BaseModel):
         return data
 
     def resolved_server_types(self) -> dict[str, str]:
-        preset = SIZE_PRESETS[self.cluster_size.value]
         return {
-            "master_server_type": self.master_server_type or preset["master_server_type"],
-            "webrtc_server_type": self.webrtc_server_type or preset["webrtc_server_type"],
-            "web_server_type": self.worker_server_type or preset["web_server_type"],
+            "master_server_type": (self.master_server_type or "").strip(),
+            "webrtc_server_type": (self.webrtc_server_type or "").strip(),
+            "web_server_type": (self.worker_server_type or "").strip(),
         }
 
 

@@ -79,6 +79,13 @@ def mark_pipeline_failed(
         return
     err = error.strip() or "Provisioning failed"
     intervention = classify_pipeline_error(err)
+    if intervention == "cluster_join":
+        try:
+            from services.node_diagnostics import log_cluster_diagnostics
+
+            log_cluster_diagnostics(instance_id)
+        except Exception:
+            pass
     update_status(
         instance_id,
         phase or status.phase or "validate",
