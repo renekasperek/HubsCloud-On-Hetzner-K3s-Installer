@@ -15,6 +15,18 @@ from pipeline.provision import run_pipeline
 from pipeline.spec_validation import validate_hetzner_token, validate_spec
 from services.health import evaluate_health
 from services.storage import load_spec, load_status
+from services.volume_inventory import build_volumes_context, sync_from_cluster
+
+
+def get_volumes_context(instance_id: str) -> dict:
+    spec = load_spec(instance_id)
+    return build_volumes_context(spec).model_dump()
+
+
+def sync_volume_inventory(instance_id: str) -> dict:
+    spec = load_spec(instance_id)
+    sync_from_cluster(instance_id, spec)
+    return build_volumes_context(spec).model_dump()
 
 
 def get_health(instance_id: str, *, probe_public: bool = True) -> dict:
@@ -54,4 +66,6 @@ __all__ = [
     "build_debug_bundle",
     "get_health",
     "get_resources",
+    "get_volumes_context",
+    "sync_volume_inventory",
 ]

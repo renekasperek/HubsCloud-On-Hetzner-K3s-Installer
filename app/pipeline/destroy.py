@@ -134,6 +134,11 @@ def destroy_cluster(instance_id: str) -> dict:
             f"{len(skipped.get('volumes') or [])} block volume(s)",
         )
 
+    hetzner_vol_ids = [int(v["id"]) for v in (inventory.get("persistent_volumes") or []) if v.get("id")]
+    from services.volume_inventory import snapshot_on_destroy
+
+    snapshot_on_destroy(instance_id, spec, hetzner_vol_ids or None)
+
     _clear_local_cluster_artifacts(instance_id, spec)
 
     verify = provider.audit_cluster(token)

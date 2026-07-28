@@ -83,6 +83,7 @@ def build_secrets_zip(instance_id: str, *, progress_url: str | None = None) -> b
             "spec-redacted.json      — installer spec (sensitive fields redacted)",
             "rendered/hcce.yaml      — full HCCE manifest applied to the cluster",
             "rendered/k8s/           — rendered platform manifests (HAProxy, cert-manager, etc.)",
+            "volumes-inventory.json  — PVC → Hetzner volume ID mapping for disaster recovery",
             "ssh/id_ed25519          — SSH private key for node access (cluster user)",
             "ssh/id_ed25519.pub      — matching SSH public key",
             "",
@@ -123,6 +124,9 @@ def build_secrets_zip(instance_id: str, *, progress_url: str | None = None) -> b
                 if path.is_file():
                     arcname = Path("rendered") / path.relative_to(rendered)
                     zf.write(path, arcname.as_posix())
+        inv_path = instance_dir(instance_id) / "volumes-inventory.json"
+        if inv_path.exists():
+            zf.write(inv_path, "volumes-inventory.json")
     return buf.getvalue()
 
 

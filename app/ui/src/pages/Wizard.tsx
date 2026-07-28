@@ -20,6 +20,43 @@ type ImageMode = "default" | "pin" | "custom";
 const DATA_VOLUME_GB = [10, 20, 50, 100, 200, 500] as const;
 const BACKUP_VOLUME_GB = [10, 20] as const;
 
+const PVC_LABELS: Record<string, string> = {
+  "pgsql-pvc": "PostgreSQL database",
+  "ret-pvc": "Reticulum (assets & uploads)",
+  "pgsql-backups-pvc": "PostgreSQL backup",
+};
+
+type VolumeReattachPolicy = {
+  mode: "provision_new" | "reattach_saved";
+  volumes: Record<string, boolean>;
+};
+
+type VolumeContextEntry = {
+  pvc_name: string;
+  role: string;
+  size: string;
+  hetzner_volume_id: number | null;
+  hetzner_volume_name: string | null;
+  status: string;
+  in_hetzner: boolean;
+  in_inventory: boolean;
+  selected_for_reattach: boolean;
+  reattach_eligible: boolean;
+};
+
+type VolumesContext = {
+  reattach_eligible: boolean;
+  entries: VolumeContextEntry[];
+};
+
+function getReattachPolicy(spec: Spec): VolumeReattachPolicy {
+  const raw = spec.volume_reattach as VolumeReattachPolicy | undefined;
+  if (raw && (raw.mode === "provision_new" || raw.mode === "reattach_saved")) {
+    return { mode: raw.mode, volumes: { ...(raw.volumes || {}) } };
+  }
+  return { mode: "provision_new", volumes: {} };
+}
+
 function volumeGi(gb: number) {
   return `${gb}Gi`;
 }
@@ -121,6 +158,8 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
   const [catalogError, setCatalogError] = useState("");
   const [serverTypesOk, setServerTypesOk] = useState<boolean | null>(null);
   const [serverTypesMsg, setServerTypesMsg] = useState("");
+  const [volumesCtx, setVolumesCtx] = useState<VolumesContext | null>(null);
+  const [volumesLoading, setVolumesLoading] = useState(false);
 
   useEffect(() => {
     api<{ spec: Spec }>(`/instances/${instanceId}`).then((d) => {
@@ -187,6 +226,53 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
       void loadServerTypes();
     }
   }, [step, tokenOk, location, loadServerTypes]);
+
+  const loadVolumes = useCallback(async () => {
+    setVolumesLoading(true);
+    try {
+      const ctx = await api<VolumesContext>(`/instances/${instanceId}/volumes`);
+      setVolumesCtx(ctx);
+    } catch {
+      setVolumesCtx(null);
+    } finally {
+      setVolumesLoading(false);
+    }
+  }, [instanceId]);
+
+  useEffect(() => {
+    if ((step === 2 || step === 6) && tokenOk === true) {
+      void loadVolumes();
+    }
+  }, [step, tokenOk, loadVolumes]);
+
+  const reattachPolicy = getReattachPolicy(spec);
+
+  const setReattachMode = (enabled: boolean) => {
+    patchAndSave({
+      volume_reattach: {
+        mode: enabled ? "reattach_saved" : "provision_new",
+        volumes: reattachPolicy.volumes,
+      },
+    });
+  };
+
+  const setReattachVolume = (pvcName: string, enabled: boolean) => {
+    patchAndSave({
+      volume_reattach: {
+        mode: reattachPolicy.mode,
+        volumes: { ...reattachPolicy.volumes, [pvcName]: enabled },
+      },
+    });
+  };
+
+  const isVolumeSizeLocked = (pvcName: string) => {
+    if (reattachPolicy.mode !== "reattach_saved") return false;
+    const entry = volumesCtx?.entries.find((e) => e.pvc_name === pvcName);
+    if (!entry?.reattach_eligible) return false;
+    const selected =
+      pvcName in reattachPolicy.volumes ? reattachPolicy.volumes[pvcName] : true;
+    return selected;
+  };
 
   useEffect(() => {
     if (step > 0 && tokenOk !== true) {
@@ -584,6 +670,56 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
 
             <div className="cluster" style={{ marginTop: 16 }}>
               <p className="cluster-title">Storage volumes</p>
+              {volumesCtx?.reattach_eligible && (
+                <div className="cluster" style={{ marginBottom: 16, background: "var(--bg-subtle)" }}>
+                  <p className="cluster-title" style={{ marginTop: 0 }}>
+                    Existing Hetzner volumes
+                  </p>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    Saved volume IDs from a previous run of this instance were found. Reattach them instead of
+                    provisioning empty disks.
+                  </p>
+                  <label className="field" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={reattachPolicy.mode === "reattach_saved"}
+                      onChange={(e) => setReattachMode(e.target.checked)}
+                    />
+                    <span>Reattach saved volumes</span>
+                  </label>
+                  {volumesLoading && <p className="muted">Checking saved volumes…</p>}
+                  <ul className="topo-list" style={{ margin: 0, paddingLeft: 0, listStyle: "none" }}>
+                    {(volumesCtx.entries || [])
+                      .filter((e) => e.reattach_eligible)
+                      .map((entry) => {
+                        const checked =
+                          reattachPolicy.mode === "reattach_saved" &&
+                          (entry.pvc_name in reattachPolicy.volumes
+                            ? reattachPolicy.volumes[entry.pvc_name]
+                            : true);
+                        return (
+                          <li key={entry.pvc_name} style={{ marginBottom: 8 }}>
+                            <label style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={reattachPolicy.mode !== "reattach_saved"}
+                                onChange={(e) => setReattachVolume(entry.pvc_name, e.target.checked)}
+                              />
+                              <span>
+                                <strong>{PVC_LABELS[entry.pvc_name] || entry.pvc_name}</strong>
+                                <br />
+                                <span className="muted" style={{ fontSize: 13 }}>
+                                  Hetzner #{entry.hetzner_volume_id} · {entry.size} · {entry.status}
+                                </span>
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              )}
               <p className="muted" style={{ marginTop: 0 }}>
                 Hetzner Cloud block volumes — minimum 10 GB. Sizes bill continuously until deleted.
               </p>
@@ -592,6 +728,7 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                 <select
                   id="pgsql-volume"
                   value={volumeGbFromGi(spec.pgsql_volume_size as string, 10)}
+                  disabled={isVolumeSizeLocked("pgsql-pvc")}
                   onChange={(e) => patchAndSave({ pgsql_volume_size: volumeGi(Number(e.target.value)) })}
                 >
                   {DATA_VOLUME_GB.map((gb) => (
@@ -606,6 +743,7 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                 <select
                   id="reticulum-volume"
                   value={volumeGbFromGi(spec.reticulum_volume_size as string, 10)}
+                  disabled={isVolumeSizeLocked("ret-pvc")}
                   onChange={(e) => patchAndSave({ reticulum_volume_size: volumeGi(Number(e.target.value)) })}
                 >
                   {DATA_VOLUME_GB.map((gb) => (
@@ -620,6 +758,7 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                 <select
                   id="pgsql-backup-volume"
                   value={volumeGbFromGi(spec.pgsql_backup_volume_size as string, 10)}
+                  disabled={isVolumeSizeLocked("pgsql-backups-pvc")}
                   onChange={(e) => patchAndSave({ pgsql_backup_volume_size: volumeGi(Number(e.target.value)) })}
                 >
                   {BACKUP_VOLUME_GB.map((gb) => (
@@ -871,6 +1010,15 @@ export function WizardPage({ instanceId }: { instanceId: string }) {
                 <p><strong>PostgreSQL volume:</strong> {formatVolumeLabel(volumeGbFromGi(spec.pgsql_volume_size as string, 10))}</p>
                 <p><strong>Reticulum volume:</strong> {formatVolumeLabel(volumeGbFromGi(spec.reticulum_volume_size as string, 10))}</p>
                 <p><strong>Postgres backup volume:</strong> {formatVolumeLabel(volumeGbFromGi(spec.pgsql_backup_volume_size as string, 10))}</p>
+                <p>
+                  <strong>Volume strategy:</strong>{" "}
+                  {reattachPolicy.mode === "reattach_saved"
+                    ? `Reattach saved Hetzner volumes (${(volumesCtx?.entries || [])
+                        .filter((e) => e.selected_for_reattach)
+                        .map((e) => e.pvc_name)
+                        .join(", ") || "none selected"})`
+                    : "Provision new volumes"}
+                </p>
               </div>
               <div className="cluster">
                 <p className="cluster-title">Mail & admin</p>

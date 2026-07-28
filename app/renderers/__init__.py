@@ -161,6 +161,36 @@ def render_hcce(spec: InstanceSpec, secrets: dict[str, str]) -> Path:
     return out
 
 
+def render_static_pvs(spec: InstanceSpec, secrets: dict[str, str]) -> Path | None:
+    from services.volume_inventory import reattach_entries
+
+    entries = reattach_entries(spec)
+    if not entries:
+        inst = instance_dir(spec.id)
+        out = inst / "rendered" / "hcce-static-pvs.yaml"
+        if out.exists():
+            out.unlink()
+        return None
+
+    inst = instance_dir(spec.id)
+    rendered_dir = inst / "rendered"
+    rendered_dir.mkdir(parents=True, exist_ok=True)
+    env = _jinja_env()
+    template = env.get_template("hcce/static-pvs.yaml.j2")
+    ctx = _base_context(spec, secrets)
+    ctx["reattach_volumes"] = [
+        {
+            "pvc_name": e.pvc_name,
+            "size": e.size,
+            "hetzner_volume_id": e.hetzner_volume_id,
+        }
+        for e in entries
+    ]
+    out = rendered_dir / "hcce-static-pvs.yaml"
+    out.write_text(template.render(**ctx))
+    return out
+
+
 def render_platform(spec: InstanceSpec, secrets: dict[str, str], private_network_id: str = "0") -> Path:
     inst = instance_dir(spec.id)
     k8s_out = inst / "rendered" / "k8s"
@@ -186,6 +216,7 @@ def render_platform(spec: InstanceSpec, secrets: dict[str, str], private_network
 def render_all(spec: InstanceSpec, secrets: dict[str, str], private_network_id: str = "0") -> None:
     render_terraform(spec, secrets)
     render_hcce(spec, secrets)
+    render_static_pvs(spec, secrets)
     render_platform(spec, secrets, private_network_id)
 
 

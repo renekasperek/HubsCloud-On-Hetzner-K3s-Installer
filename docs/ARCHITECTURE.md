@@ -8,7 +8,7 @@
 | FastAPI | REST API, background pipeline, static file serve |
 | Jinja2 renderers | `templates/` → `/data/instances/<id>/` |
 | Pipeline | terraform, kubectl, helm subprocesses |
-| `/data` volume | spec, secrets, kubeconfig, tfstate, logs |
+| `/data` volume | spec, secrets, kubeconfig, tfstate, volumes-inventory.json, logs |
 
 ## Flow
 

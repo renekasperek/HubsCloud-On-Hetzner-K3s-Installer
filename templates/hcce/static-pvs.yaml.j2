@@ -1,0 +1,30 @@
+######################################################################################
+# Static PVs for reattaching existing Hetzner CSI volumes (Retain policy).
+# Applied before hcce.yaml when volume_reattach.mode=reattach_saved.
+######################################################################################
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hcce
+---
+{% for vol in reattach_volumes %}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: reuse-{{ vol.pvc_name }}
+spec:
+  capacity:
+    storage: {{ vol.size }}
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hcloud-volumes-retain
+  claimRef:
+    namespace: hcce
+    name: {{ vol.pvc_name }}
+  csi:
+    driver: csi.hetzner.cloud
+    volumeHandle: "{{ vol.hetzner_volume_id }}"
+    fsType: ext4
+---
+{% endfor %}

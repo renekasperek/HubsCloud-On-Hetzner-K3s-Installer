@@ -24,6 +24,9 @@
 
 ### Added
 
+- **Volume inventory and reattach** — pipeline saves `volumes-inventory.json` (PVC → Hetzner volume ID)
+  after HCCE deploy and on destroy; wizard step *Machines & SSH* offers reattach when saved volumes
+  exist; reprovision applies `hcce-static-pvs.yaml` before HCCE PVCs. See `docs/VOLUME-RECOVERY.md`.
 - `wait_nodes_initialized()` gate after CCM install — blocks until every node has a
   `hcloud://` providerID, and fails with an actionable message instead of letting later steps
   hang on unschedulable pods (nodes now carry the `uninitialized` taint until the CCM clears it)

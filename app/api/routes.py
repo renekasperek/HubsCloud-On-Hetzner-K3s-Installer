@@ -15,10 +15,12 @@ from pipeline.runner import (
     get_health,
     get_ingress_load_balancer_info,
     get_resources,
+    get_volumes_context,
     harden_firewall,
     mark_pipeline_failed,
     refresh_deployment_lb_ip,
     run_pipeline,
+    sync_volume_inventory,
     validate_hetzner_token,
 )
 from pipeline.cluster_repair import repair_cluster_join
@@ -29,6 +31,7 @@ from schemas.models import (
     HetznerAudit,
     InstanceSpec,
     InstanceStatus,
+    VolumesContext,
 )
 from services.cluster_join import get_cluster_join_status
 from services.hetzner import audit_hetzner_cluster
@@ -121,6 +124,17 @@ def get_instance(instance_id: str):
             if refreshed:
                 deployment_info = refreshed
     return {"spec": safe, "status": status, "deployment_info": deployment_info}
+
+
+@router.get("/instances/{instance_id}/volumes")
+def get_instance_volumes(instance_id: str) -> VolumesContext:
+    spec = load_spec(instance_id)
+    return VolumesContext.model_validate(get_volumes_context(instance_id))
+
+
+@router.post("/instances/{instance_id}/sync-volumes")
+def sync_instance_volumes(instance_id: str) -> VolumesContext:
+    return VolumesContext.model_validate(sync_volume_inventory(instance_id))
 
 
 @router.put("/instances/{instance_id}/spec")

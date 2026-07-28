@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import DATA_DIR, instance_dir
-from schemas.models import InstanceSpec, InstanceStatus
+from schemas.models import InstanceSpec, InstanceStatus, VolumeInventory
 
 
 def _now() -> str:
@@ -88,3 +88,16 @@ def list_instances() -> list[dict]:
 def save_deployment_info(instance_id: str, info: dict) -> None:
     path = instance_dir(instance_id) / "deployment_info.json"
     path.write_text(json.dumps(info, indent=2))
+
+
+def load_volumes_inventory(instance_id: str) -> VolumeInventory | None:
+    path = instance_dir(instance_id) / "volumes-inventory.json"
+    if not path.exists():
+        return None
+    return VolumeInventory.model_validate_json(path.read_text())
+
+
+def save_volumes_inventory(instance_id: str, inventory: VolumeInventory) -> None:
+    inst = instance_dir(instance_id)
+    inst.mkdir(parents=True, exist_ok=True)
+    (inst / "volumes-inventory.json").write_text(inventory.model_dump_json(indent=2))

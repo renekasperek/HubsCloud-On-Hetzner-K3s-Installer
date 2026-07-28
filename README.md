@@ -106,7 +106,7 @@ On the progress page, **Danger zone → Destroy cluster infrastructure** runs `t
 
 Those resources **keep billing** after destroy. That is intentional: tearing down the cluster should not silently wipe your database. Delete load balancer(s) and block volume(s) manually in [Hetzner Console](https://console.hetzner.cloud) when you accept data loss and want billing to stop.
 
-Wizard settings, secrets, and SSH keys under `./data` are **kept** so you can provision again immediately.
+Wizard settings, secrets, SSH keys, and **`volumes-inventory.json`** under `./data` are **kept** so you can provision again immediately (optionally reattach CSI volumes in the wizard).
 
 After destroy, the installer reports **success** when Terraform-managed resources are gone. The audit shows a **warning** (not a failure) if Kubernetes load balancer(s) and/or CSI volumes remain.
 

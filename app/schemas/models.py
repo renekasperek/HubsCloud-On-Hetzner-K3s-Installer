@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -44,6 +44,66 @@ CLUSTER_SIZE_RECOMMENDATIONS: dict[str, dict[str, dict[str, int]]] = {
 
 ALLOWED_LOCATIONS = {"nbg1", "fsn1", "hel1", "ash", "hil"}  # fallback when API unavailable
 
+HCCE_NAMESPACE = "hcce"
+
+# PVC names are fixed in hcce.yaml.j2 — used for inventory and reattach.
+KNOWN_VOLUME_PVCS: dict[str, dict[str, str]] = {
+    "pgsql-pvc": {"role": "postgresql", "size_field": "pgsql_volume_size"},
+    "ret-pvc": {"role": "reticulum", "size_field": "reticulum_volume_size"},
+    "pgsql-backups-pvc": {"role": "postgresql-backup", "size_field": "pgsql_backup_volume_size"},
+}
+
+
+class VolumeInventoryEntry(BaseModel):
+    pvc_name: str
+    namespace: str = HCCE_NAMESPACE
+    role: str = ""
+    size: str = "10Gi"
+    pvc_uid: str | None = None
+    pv_name: str | None = None
+    hetzner_volume_id: int | None = None
+    hetzner_volume_name: str | None = None
+    status: str = "unknown"  # bound | pending | orphaned | missing | available
+    bound_at: str | None = None
+
+
+class VolumeInventory(BaseModel):
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    location: str = ""
+    volumes: list[VolumeInventoryEntry] = Field(default_factory=list)
+
+
+class VolumeReattachPolicy(BaseModel):
+    mode: Literal["provision_new", "reattach_saved"] = "provision_new"
+    # Per-PVC override; omitted keys default to True when mode=reattach_saved and inventory has an ID.
+    volumes: dict[str, bool] = Field(default_factory=dict)
+
+    def wants_reattach(self, pvc_name: str, *, has_saved_id: bool) -> bool:
+        if self.mode != "reattach_saved" or not has_saved_id:
+            return False
+        if pvc_name in self.volumes:
+            return self.volumes[pvc_name]
+        return True
+
+
+class VolumeContextEntry(BaseModel):
+    pvc_name: str
+    role: str
+    size: str
+    hetzner_volume_id: int | None = None
+    hetzner_volume_name: str | None = None
+    status: str
+    in_hetzner: bool = False
+    in_inventory: bool = False
+    selected_for_reattach: bool = False
+    reattach_eligible: bool = False
+
+
+class VolumesContext(BaseModel):
+    inventory: VolumeInventory
+    reattach_eligible: bool = False
+    entries: list[VolumeContextEntry] = Field(default_factory=list)
+
 
 class InstanceSpec(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
@@ -69,6 +129,7 @@ class InstanceSpec(BaseModel):
     pgsql_volume_size: str = DEFAULT_PGSQL_VOLUME
     reticulum_volume_size: str = DEFAULT_RETICULUM_VOLUME
     pgsql_backup_volume_size: str = DEFAULT_PGSQL_BACKUP_VOLUME
+    volume_reattach: VolumeReattachPolicy = Field(default_factory=VolumeReattachPolicy)
     firewall_hardened: bool = False
     firewall_allow_ssh: bool = True
     auto_repair_cluster_join: bool = True

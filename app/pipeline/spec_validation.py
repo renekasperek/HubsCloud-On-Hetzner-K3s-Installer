@@ -69,6 +69,12 @@ def validate_spec(spec: InstanceSpec) -> None:
     if volume_errors:
         raise PipelineError("; ".join(volume_errors))
 
+    from services.volume_inventory import validate_reattach
+
+    reattach_errors = validate_reattach(spec)
+    if reattach_errors:
+        raise PipelineError("; ".join(reattach_errors))
+
     types = spec.resolved_server_types()
     ok, msg, _invalid = validate_server_types(
         spec.hetzner_api_token,

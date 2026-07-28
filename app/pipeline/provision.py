@@ -11,7 +11,7 @@ from pipeline.spec_validation import (
 )
 from pipeline.terraform_ops import terraform_output, terraform_step
 from pipeline.workloads import install_ccm_csi, install_cert_manager, kubectl_apply_dir
-from renderers import plan_labels, plan_svclb_labels, render_all, render_platform
+from renderers import plan_labels, plan_svclb_labels, render_all, render_platform, render_static_pvs
 from services.providers.registry import get_cloud_provider
 from services.secrets import generate_secrets
 from services.storage import (
@@ -109,8 +109,23 @@ def run_pipeline(instance_id: str) -> None:
         run_cmd(["kubectl", "apply", "-f", str(k8s / "cert-manager" / "cluster-issuer.yaml")], env=kube_env(instance_id))
 
         update_status(instance_id, "workloads", 9, "running", "Deploying HCCE")
+        static_pvs = render_static_pvs(spec, secrets)
+        if static_pvs:
+            append_log(
+                instance_id,
+                f"Reattaching {static_pvs.name} — binding saved Hetzner volumes before HCCE PVCs",
+            )
+            run_cmd(["kubectl", "apply", "-f", str(static_pvs)], env=kube_env(instance_id), timeout=120)
         hcce = instance_dir(instance_id) / "rendered" / "hcce.yaml"
         run_cmd(["kubectl", "apply", "-f", str(hcce)], env=kube_env(instance_id), timeout=600)
+
+        from services.volume_inventory import sync_from_cluster, wait_for_pvc_binding
+
+        wait_for_pvc_binding(instance_id)
+        inv = sync_from_cluster(instance_id, spec)
+        bound = [f"{e.pvc_name}→{e.hetzner_volume_id}" for e in inv.volumes if e.hetzner_volume_id]
+        if bound:
+            append_log(instance_id, f"Volume inventory saved: {', '.join(bound)}")
 
         lb_ip = wait_lb_public_ip(instance_id, spec, network_id, timeout=600)
         update_status(instance_id, "done", 10, "running", "Writing deployment info")

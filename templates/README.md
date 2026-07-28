@@ -36,6 +36,7 @@ Jinja2 templates under this directory are rendered by the installer API into `/d
 | `reticulum_image`, `hubs_image`, `spoke_image` | resolved from `core_app_images` in spec |
 | `sketchfab_api_key`, `tenor_api_key` | spec |
 | `pgsql_volume_size`, `reticulum_volume_size`, `pgsql_backup_volume_size` | spec |
+| `volume_reattach` (reattach saved Hetzner volumes on reprovision) | spec |
 | `perms_key`, `pgrst_jwt_secret` | generated once in `secrets.json`; PEM stored as one line with `\\n` (matches `k3s-setup/hcce/hcce.yaml`) |
 
 ## Pipeline apply order

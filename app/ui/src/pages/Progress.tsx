@@ -100,6 +100,33 @@ type HetznerAudit = {
   volumes?: number[];
 };
 
+type VolumeInventoryEntry = {
+  pvc_name: string;
+  role: string;
+  size: string;
+  hetzner_volume_id: number | null;
+  hetzner_volume_name: string | null;
+  status: string;
+  bound_at: string | null;
+};
+
+type VolumesContext = {
+  reattach_eligible: boolean;
+  inventory: { volumes: VolumeInventoryEntry[]; updated_at?: string };
+  entries: {
+    pvc_name: string;
+    hetzner_volume_id: number | null;
+    status: string;
+    reattach_eligible: boolean;
+  }[];
+};
+
+const PVC_LABELS: Record<string, string> = {
+  "pgsql-pvc": "PostgreSQL database",
+  "ret-pvc": "Reticulum",
+  "pgsql-backups-pvc": "PostgreSQL backup",
+};
+
 function issueLabel(issue: string | null) {
   switch (issue) {
     case "private_network_down":
@@ -238,6 +265,8 @@ export function ProgressPage({ instanceId }: { instanceId: string }) {
   const [aborting, setAborting] = useState(false);
   const [destroying, setDestroying] = useState(false);
   const [hetznerAudit, setHetznerAudit] = useState<HetznerAudit | null>(null);
+  const [volumesCtx, setVolumesCtx] = useState<VolumesContext | null>(null);
+  const [syncingVolumes, setSyncingVolumes] = useState(false);
 
   const installerProgressUrl = useMemo(
     () => `${window.location.origin}/instances/${instanceId}`,
@@ -280,6 +309,31 @@ export function ProgressPage({ instanceId }: { instanceId: string }) {
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
   }, [instanceId]);
+
+  useEffect(() => {
+    const loadVolumes = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const v = await api<VolumesContext>(`/instances/${instanceId}/volumes`);
+        setVolumesCtx(v);
+      } catch {
+        /* ignore */
+      }
+    };
+    loadVolumes();
+    const t = setInterval(loadVolumes, 15000);
+    return () => clearInterval(t);
+  }, [instanceId]);
+
+  const syncVolumes = async () => {
+    setSyncingVolumes(true);
+    try {
+      const v = await api<VolumesContext>(`/instances/${instanceId}/sync-volumes`, { method: "POST" });
+      setVolumesCtx(v);
+    } finally {
+      setSyncingVolumes(false);
+    }
+  };
 
   useEffect(() => {
     const poll = async () => {
@@ -649,7 +703,8 @@ export function ProgressPage({ instanceId }: { instanceId: string }) {
           </a>
           <p className="muted" style={{ marginTop: 8 }}>
             Contains plaintext passwords, kubeconfig, SSH keys under <code>ssh/</code>, the rendered{" "}
-            <code>hcce.yaml</code> applied to the cluster, platform manifests under <code>rendered/k8s/</code>, and{" "}
+            <code>hcce.yaml</code> applied to the cluster, platform manifests under <code>rendered/k8s/</code>,{" "}
+            <code>volumes-inventory.json</code> (PVC → Hetzner volume IDs), and{" "}
             <code>README.txt</code> with this installer URL (<code>{installerProgressUrl}</code>) so you can reopen this
             instance after rebuilding the container. Store offline; localhost-only API.
           </p>
@@ -887,6 +942,45 @@ export function ProgressPage({ instanceId }: { instanceId: string }) {
           </div>
         </section>
         </div>
+      )}
+
+      {(volumesCtx?.inventory?.volumes || []).some((v) => v.hetzner_volume_id) && status?.state !== "running" && (
+        <section className="panel" style={{ marginTop: 24 }}>
+          <h2 style={{ marginBottom: 8 }}>Volume inventory</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            PVC → Hetzner volume mapping for this instance. Use{" "}
+            <Link to={`/instances/${instanceId}/setup?step=2`}>Machines &amp; SSH</Link> to reattach after destroy.
+          </p>
+          <table className="data-table" style={{ marginTop: 8 }}>
+            <thead>
+              <tr>
+                <th>PVC</th>
+                <th>Hetzner ID</th>
+                <th>Size</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {volumesCtx!.inventory.volumes.map((v) => (
+                <tr key={v.pvc_name}>
+                  <td>{PVC_LABELS[v.pvc_name] || v.pvc_name}</td>
+                  <td style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}>{v.hetzner_volume_id ?? "—"}</td>
+                  <td>{v.size}</td>
+                  <td>{v.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button
+            type="button"
+            className="btn btn-outline"
+            style={{ marginTop: 12 }}
+            disabled={syncingVolumes || !status || status.state === "running"}
+            onClick={() => void syncVolumes()}
+          >
+            {syncingVolumes ? "Syncing…" : "Sync from cluster"}
+          </button>
+        </section>
       )}
 
       {showDestroy && (
