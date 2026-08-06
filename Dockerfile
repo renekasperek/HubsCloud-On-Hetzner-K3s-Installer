@@ -40,6 +40,9 @@ COPY app/ /app/
 COPY --from=ui-build /build/dist /app/ui/dist
 COPY templates/ /opt/templates/
 COPY README.md /opt/installer/README.md
+COPY LICENSE /opt/installer/LICENSE
+COPY AI-DISCLOSURE.md /opt/installer/AI-DISCLOSURE.md
+COPY THIRD-PARTY-NOTICES.md /opt/installer/THIRD-PARTY-NOTICES.md
 
 RUN mkdir -p /data && chmod 777 /data
 

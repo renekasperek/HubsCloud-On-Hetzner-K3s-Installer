@@ -1,28 +1,39 @@
 import { Link } from "react-router-dom";
 import { ClusterTopology } from "../components/ClusterTopology";
-import { HubsFoundationAttribution, HubsFoundationBrand, ResourceLinkRow, INSTALLER_DOCS_PATH } from "../components/HubsFoundationLinks";
+import {
+  LandingHeroBrand,
+  InstallerTopBrand,
+  ResourceLinkRow,
+  HF_HOME,
+  INSTALLER_GITHUB,
+} from "../components/HubsFoundationLinks";
 
 export function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="shell">
       <header className="topbar">
         <div className="topbar-start">
-          <HubsFoundationBrand compact />
+          <InstallerTopBrand />
           <span className="topbar-divider" aria-hidden />
           <Link to="/" className="topbar-product">
-            Hubs Installer
+            Hetzner Installer
           </Link>
         </div>
         <div className="topbar-end">
           <ResourceLinkRow className="topbar-hf-links" />
-          <span className="topbar-meta">127.0.0.1 · v1</span>
+          <span className="topbar-meta">127.0.0.1 · v1.1</span>
         </div>
       </header>
       <main className="main">{children}</main>
       <footer className="app-footer">
-        <HubsFoundationBrand compact />
+        <InstallerTopBrand height={24} />
         <ResourceLinkRow />
-        <span className="muted app-footer-meta">Local provisioning tool · not affiliated with hosting</span>
+        <span className="muted app-footer-meta">
+          Local provisioning tool · not affiliated with hosting or the hoster ·{" "}
+          <a href={`${INSTALLER_GITHUB}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">
+            MPL 2.0
+          </a>
+        </span>
       </footer>
     </div>
   );
@@ -32,15 +43,7 @@ export function LandingPage() {
   return (
     <div className="landing-wrap">
       <div className="landing-cluster">
-        <HubsFoundationAttribution />
-        <h1>Hubs Installer</h1>
-        <p style={{ fontSize: 20, margin: "0 0 8px", fontWeight: 500, color: "var(--text)" }}>
-          Deploy Hubs Cloud on Hetzner
-        </p>
-        <p className="muted" style={{ margin: 0 }}>
-          Guided setup · live provisioning status · secrets handoff. Runs locally on your machine.{" "}
-          <Link to={INSTALLER_DOCS_PATH}>Read the installer docs</Link>
-        </p>
+        <LandingHeroBrand />
         <div className="landing-actions">
           <Link to="/instances/new" className="btn btn-primary" style={{ textDecoration: "none" }}>
             Create new instance
@@ -52,6 +55,13 @@ export function LandingPage() {
         <div className="landing-topology">
           <ClusterTopology compact />
         </div>
+        <p className="landing-attribution muted">
+          Hubs is open source software maintained by the{" "}
+          <a href={HF_HOME} target="_blank" rel="noopener noreferrer">
+            Hubs Foundation
+          </a>
+          .
+        </p>
       </div>
     </div>
   );

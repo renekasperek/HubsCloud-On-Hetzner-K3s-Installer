@@ -144,3 +144,15 @@ v1 re-runs the full pipeline on retry (does not resume mid-step).
 | large | cpx32 | cx23 | cpx13 |
 
 DNS handoff uses the **Hetzner Cloud load balancer public IP** from the Hetzner API (the Kubernetes service uses a private IP because `use-private-ip` is enabled on the LB service).
+
+## License
+
+This project is licensed under the [Mozilla Public License 2.0](./LICENSE).
+
+Third-party tools and libraries used by the installer (Terraform, kubectl, Helm, Hetzner provider, Python/npm dependencies, and runtime cluster components) are listed in **[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)** with their respective licenses.
+
+## AI usage disclosure
+
+This repository is **mostly AI-generated**. Templates started from manually edited Terraform (Hetzner tutorial lineage) and HCCE YAML (Hubs Foundation `hcce.yaml`), then were transcribed into Jinja2 by an agent. The UI, backend, docs, and this disclosure are agent output with human direction — not line-by-line human review.
+
+See **[AI-DISCLOSURE.md](./AI-DISCLOSURE.md)** for the full, honest breakdown.

@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased] — 2026-07-26
+## [1.1.0] — 2026-08-06
+
+Release of provisioning fixes, volume recovery, UI/branding refresh, and licensing/disclosure documentation.
 
 ### Fixed
 
@@ -17,55 +19,9 @@
   `terraform show -json`, and applies that exact saved plan. Anything other than an in-place
   firewall update aborts.
 - Every `terraform apply` on every cluster wanted to replace all three servers. The hcloud
-  provider never writes `location` back into state (empty on all 11 instances) while the
-  config always sets it, and `location` is ForceNew. Added
-  `lifecycle { ignore_changes = [location] }` to the server resources — a server's location
-  cannot be changed in place, so it can only ever be realised by an explicit destroy + create.
-
-### Added
-
-- **Volume inventory and reattach** — pipeline saves `volumes-inventory.json` (PVC → Hetzner volume ID)
-  after HCCE deploy and on destroy; wizard step *Machines & SSH* offers reattach when saved volumes
-  exist; reprovision applies `hcce-static-pvs.yaml` before HCCE PVCs. See `docs/VOLUME-RECOVERY.md`.
-- `wait_nodes_initialized()` gate after CCM install — blocks until every node has a
-  `hcloud://` providerID, and fails with an actionable message instead of letting later steps
-  hang on unschedulable pods (nodes now carry the `uninitialized` taint until the CCM clears it)
-
-### Changed
-
-- **k3s is now pinned to `v1.36.2+k3s1`** instead of installing whatever `get.k3s.io` serves at
-  provisioning time. Applied to all six install sites — the three cloud-init templates and the
-  three `K3S_INSTALL` commands in `app/pipeline/cluster_repair.py` (via a `K3S_VERSION`
-  constant). This makes provisioning reproducible and, more importantly, removes a version-skew
-  hazard: the repair path reinstalls k3s, so an unpinned repaired node could join an older
-  master running a newer k3s inside the same etcd cluster. `v1.36.2+k3s1` is the build verified
-  healthy end to end on 2026-07-26.
-- hcloud Terraform provider **1.50.0 → 1.67.0** (16 minor versions; latest as of 2026-07-24).
-  Includes the 1.61.0 fix *"apply_to update removes firewall from state when target resource is
-  not found"*, which is in the firewall path. Pinned exactly rather than with `~>`, because
-  `.terraform.lock.hcl` is not copied into per-instance terraform dirs — a range would let
-  different clusters build with different, untested provider versions.
-  Verified: all six resource types we use are present, and every `hcloud_server` attribute we
-  set still exists. `datacenter` is deprecated but **not** yet removed, and we never used it.
-  Note: the upgrade does **not** fix the `location` state drift — `ignore_changes = [location]`
-  remains load-bearing. Not yet exercised against a live cluster.
-
-### Known Issues
-
-- The pinned `ccm-networks.yaml` v1.23.0 is the upstream Helm chart rendered with default
-  values, so it carries `--cluster-cidr=10.244.0.0/16` while the cluster uses `10.42.0.0/16`.
-  Cosmetic in the current setup — flannel VXLAN does not rely on the routes the CCM programs,
-  and the CCM does not allocate pod CIDRs. Should be set to `10.42.0.0/16` when convenient.
-- An instance is frozen at the spec it was rendered with, so template fixes only reach new
-  instances. No migration path short of destroy + re-provision.
-- Deferred hardening work is tracked in [NEXT-STEPS.md](NEXT-STEPS.md) — k3s version pinning,
-  etcd snapshots, restricting the kube-API/SSH firewall source ranges, and an OS patching
-  policy. To be addressed at the next version bump.
-
-## [Unreleased] — 2026-07-25
-
-### Fixed
-
+  provider never writes `location` back into state (empty on all instances) while the config
+  always sets it, and `location` is ForceNew. Added `lifecycle { ignore_changes = [location] }`
+  to the server resources.
 - Workers failing to join the cluster. Two regressions in the cloud-init bootstrap: a
   `curl -f` readiness probe against `/readyz` (returns 401 anonymously, so the wait loop
   never exited) and an `ip route add ... scope link` for the private network (overrode
@@ -76,25 +32,63 @@
 
 ### Added
 
-- Private NIC auto-detection so `--flannel-iface` survives interface renames across images
-- `kernel.apparmor_restrict_unprivileged_userns=0` for Ubuntu 24.04 containerd compatibility
-- Bootstrap stage markers surfaced in cluster diagnostics
-- 3-attempt k3s join retry so a lost etcd race self-heals
+- **Volume inventory and reattach** — pipeline saves `volumes-inventory.json` (PVC → Hetzner volume ID)
+  after HCCE deploy and on destroy; wizard step *Machines & SSH* offers reattach when saved volumes
+  exist; reprovision applies static PV manifests before HCCE PVCs. See [VOLUME-RECOVERY.md](VOLUME-RECOVERY.md).
+- `wait_nodes_initialized()` gate after CCM install — blocks until every node has a
+  `hcloud://` providerID, and fails with an actionable message instead of letting later steps
+  hang on unschedulable pods.
+- Private NIC auto-detection so `--flannel-iface` survives interface renames across images.
+- `kernel.apparmor_restrict_unprivileged_userns=0` for Ubuntu 24.04 containerd compatibility.
+- Bootstrap stage markers surfaced in cluster diagnostics.
+- 3-attempt k3s join retry so a lost etcd race self-heals.
+- **Hetzner Installer branding** — Hubs-on-Hetzner hero mark, top-bar logo, "Hetzner Infrastructure" tagline.
+- Navigation link to the [GitHub repository](https://github.com/splexit/HubsCloud-On-Hetzner-K3s-Installer).
+- [LICENSE](../LICENSE) (MPL 2.0, same text as Hubs Foundation hubs).
+- [AI-DISCLOSURE.md](../AI-DISCLOSURE.md) — honest AI usage and provenance disclosure.
+- [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) — Terraform, kubectl, Helm, Hetzner provider, and runtime component licenses.
+
+### Changed
+
+- **k3s pinned to `v1.36.2+k3s1`** across all cloud-init templates and `cluster_repair.py`
+  (`K3S_VERSION` constant) for reproducible provisioning and repair without version skew.
+- hcloud Terraform provider **1.50.0 → 1.67.0**, pinned exactly in `main.tf`.
+- Landing page redesigned — hero focuses on branding and actions; duplicate nav links removed from the card.
+- Product name and UI copy updated to **Hetzner Installer** (page title, top bar, hero).
+- Version tag in UI: **v1.1**.
+- Footer disclaimer: not affiliated with hosting or the hoster; MPL 2.0 link.
+- Hetzner logo size reduced in the hero brand mark.
+
+### Known issues
+
+- The pinned `ccm-networks.yaml` v1.23.0 carries `--cluster-cidr=10.244.0.0/16` while the
+  cluster uses `10.42.0.0/16`. Cosmetic in the current setup; should be set to `10.42.0.0/16`
+  when convenient.
+- An instance is frozen at the spec it was rendered with, so template fixes only reach new
+  instances. No migration path short of destroy + re-provision.
+- hcloud provider upgrade does **not** fix `location` state drift — `ignore_changes = [location]`
+  remains load-bearing. Provider bump not yet fully exercised against every live cluster variant.
+- Deferred hardening work is tracked in [NEXT-STEPS.md](NEXT-STEPS.md) — etcd snapshots,
+  restricting kube-API/SSH firewall source ranges, and an OS patching policy.
+
+---
 
 ## [1.0.0] — 2026-07-24
 
+Initial public release.
+
 ### App
 
-- Added FastAPI installer with Create New Instance wizard (Harbor Desk UI)
-- Added pipeline: Terraform → k3s → CCM/CSI → HAProxy → cert-manager → curated HCCE
-- Added live cluster resource polling and secrets ZIP download
-- Manage Existing stub page
+- FastAPI installer with Create New Instance wizard (web UI).
+- Pipeline: Terraform → k3s → CCM/CSI → HAProxy → cert-manager → curated HCCE.
+- Live cluster resource polling and secrets ZIP download.
+- Manage Existing stub page.
 
 ### Templates
 
-- Added redacted Terraform multi-node layout with size/location variables
-- Added HAProxy, cert-manager issuer, CCM/CSI secrets, metrics-server, curated `hcce.yaml.j2` with pgsql-backup
+- Redacted Terraform multi-node layout with size/location variables.
+- HAProxy, cert-manager issuer, CCM/CSI secrets, metrics-server, curated `hcce.yaml.j2` with pgsql-backup.
 
 ### Redacted
 
-- All production credentials removed from templates; placeholders only
+- All production credentials removed from templates; placeholders only.
